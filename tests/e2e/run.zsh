@@ -49,6 +49,10 @@ env["SETTING_SOCIAL_AUTH_OIDC_ENABLED_IDPS"] = env["SETTING_SOCIAL_AUTH_OIDC_ENA
 # Zulip sends outgoing HTTP through smokescreen, which refuses private addresses; the
 # mock IdP is one (login.microsoftonline.com in production is not). E2E only.
 env["CONFIG_http_proxy__allow_ranges"] = subnet
+# The runner itself (the other tests) is exempt; test_rate_limits simulates outside
+# clients with X-Forwarded-For, which nginx trusts from the runner's network.
+assert env["CHAT_RATE_LIMITS"] == "auth:6r/m:2,api:2r/s:5", env["CHAT_RATE_LIMITS"]
+env["CHAT_RATE_LIMIT_EXEMPT"] = f"{env['CHAT_RATE_LIMIT_EXEMPT']} {subnet}"
 assert not any("$" in v for v in env.values()), "compose would interpolate $"
 mgmt = {**env, "AUTO_BACKUP_ENABLED": "False"}
 json.dump({"services": {"zulip": {"environment": env}, "mgmt": {"environment": mgmt}}}, sys.stdout, indent=2)

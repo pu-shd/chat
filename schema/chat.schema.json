@@ -497,6 +497,43 @@
           }
         }
       }
+    },
+    "rate_limits": {
+      "description": "Per-client-IP request limits in Zulip's nginx (after the proxy's X-Forwarded-For is resolved). 'auth' covers sign-in, sign-up and API-key paths; 'api' covers /api/ and /json/. Exempt ranges are never limited (default: the campus ranges). Over the limit nginx answers 429.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "auth_per_minute": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 6000
+        },
+        "auth_burst": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "api_per_second": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "api_burst": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000
+        },
+        "exempt_ranges": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/cidr4"
+          },
+          "maxItems": 200
+        }
+      }
     }
   }
 }

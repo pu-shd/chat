@@ -257,6 +257,7 @@ def platform_spec(cfg: dict[str, Any]) -> dict[str, Any]:
         "email": email,
         "acs": acs,
         "healthchecks": healthchecks_base(cfg),
+        "rate_limits": rate_limits_spec(cfg, gate),
         "ip_gate": {
             "enabled": gate.get("enabled", True),
             "prefix_mode": gate.get("prefix_mode", "vendor"),
@@ -268,6 +269,19 @@ def platform_spec(cfg: dict[str, Any]) -> dict[str, Any]:
             "snapshot_max_age_days": gate.get("snapshot_max_age_days", 30),
         },
     }
+
+
+RATE_LIMIT_DEFAULTS = {
+    # Generous: many VPN users share a handful of Prisma Access egress addresses, and a
+    # Zulip client polls /json/events continuously and sends a request per action.
+    "enabled": True, "auth_per_minute": 20, "auth_burst": 30, "api_per_second": 50, "api_burst": 500,
+}
+
+
+def rate_limits_spec(cfg: dict[str, Any], gate: dict[str, Any]) -> dict[str, Any]:
+    rl = {**RATE_LIMIT_DEFAULTS, **cfg.get("rate_limits", {})}
+    rl["exempt_ranges"] = rl.get("exempt_ranges", gate.get("campus_ranges", DEFAULT_CAMPUS_RANGES))
+    return rl
 
 
 def healthchecks_base(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -551,6 +565,7 @@ def render_config(cfg: dict[str, Any], dept_dir: Path) -> Rendered:
 def zulip_settings(plat, s, name, db, tenant, entra, preview_realm) -> dict[str, str]:
     """docker-zulip environment (non-secret). {{...}} are filled by `resolve`."""
     email = plat["email"]
+    rl = plat["rate_limits"]
     idp = {
         "entra": {
             "oidc_url": f"https://login.microsoftonline.com/{tenant}/v2.0",
@@ -592,6 +607,10 @@ def zulip_settings(plat, s, name, db, tenant, entra, preview_realm) -> dict[str,
         "CONFIG_application_server__queue_workers_multiprocess": "false",
         "ZULIP_RUN_POST_SETUP_SCRIPTS": "True",
         "CHAT_REDIRECTS_B64": "{{redirects_b64}}",
+        # Parameters only: chat-entrypoint builds the nginx limit_req config from these.
+        "CHAT_RATE_LIMITS": (f"auth:{rl['auth_per_minute']}r/m:{rl['auth_burst']},"
+                             f"api:{rl['api_per_second']}r/s:{rl['api_burst']}") if rl["enabled"] else "",
+        "CHAT_RATE_LIMIT_EXEMPT": " ".join(rl["exempt_ranges"]) if rl["enabled"] else "",
         "CHAT_SERVER_NAME": name,
     }
     if s["kind"] == "shared":

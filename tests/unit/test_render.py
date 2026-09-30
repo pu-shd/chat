@@ -460,3 +460,30 @@ def test_acs_managed_domain_resolves_sender_at_deploy(dept, capsys):
 def test_acs_validation(dept, capsys, email, message):
     dept.edit(lambda c: c.update(email=email))
     assert message in rerender_error(dept, capsys)
+
+
+# ---------------------------------------------------------------- rate limits
+
+
+def test_rate_limits_default_on_with_campus_exempt(dept, capsys):
+    env = resolve(dept, "dept", capsys)["_env"]
+    assert env["CHAT_RATE_LIMITS"] == "auth:20r/m:30,api:50r/s:500"
+    assert env["CHAT_RATE_LIMIT_EXEMPT"].split() == render.DEFAULT_CAMPUS_RANGES
+
+
+def test_rate_limits_configurable_and_can_be_turned_off(dept, capsys):
+    dept.edit(lambda c: c.update(rate_limits={"auth_per_minute": 5, "api_per_second": 9, "api_burst": 40,
+                                              "exempt_ranges": ["192.0.2.0/24"]}))
+    dept.render()
+    env = resolve(dept, "dept", capsys)["_env"]
+    assert env["CHAT_RATE_LIMITS"] == "auth:5r/m:30,api:9r/s:40"
+    assert env["CHAT_RATE_LIMIT_EXEMPT"] == "192.0.2.0/24"
+    dept.edit(lambda c: c.update(rate_limits={"enabled": False}))
+    dept.render()
+    env = resolve(dept, "dept", capsys)["_env"]
+    assert "CHAT_RATE_LIMITS" not in env and "CHAT_RATE_LIMIT_EXEMPT" not in env
+
+
+def test_rate_limits_schema(dept, capsys):
+    dept.edit(lambda c: c.update(rate_limits={"api_per_second": 0}))
+    assert "schema validation failed" in rerender_error(dept, capsys)

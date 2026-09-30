@@ -96,3 +96,29 @@ def test_hc_job_pinged_success_then_fail():
     # Anything but /health is rejected (Django refuses the internal Host header), so the
     # probe reports it; /health works only because Zulip's nginx pins the Host.
     assert re.search(r"returned [45]\d\d", pings[1]["body"]), pings[1]["body"]
+
+
+def burst(path, client_ip, n):
+    return [get(path, headers={"X-Forwarded-For": client_ip}).status_code for _ in range(n)]
+
+
+def test_rate_limits_sign_in_per_client_ip():
+    codes = burst("/accounts/login/", "198.51.100.7", 8)
+    assert 429 in codes, codes          # burst 2 at 6/min: the 4th request is over
+    assert codes[0] != 429, codes
+    other = burst("/accounts/login/", "198.51.100.8", 1)
+    assert other[0] != 429, other       # per IP: another client is unaffected
+
+
+def test_rate_limits_api_per_client_ip():
+    codes = burst("/api/v1/server_settings", "198.51.100.9", 20)
+    assert 429 in codes, codes
+
+
+def test_exempt_range_is_never_limited():
+    codes = burst("/accounts/login/", "192.0.2.10", 12)
+    assert 429 not in codes, codes
+
+
+def test_static_and_health_are_not_limited():
+    assert 429 not in burst("/health", "198.51.100.7", 10)

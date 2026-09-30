@@ -10,6 +10,8 @@ github: {repo: pu-shd/chat, environment: e2e}
 admin_email: admin@e2e.test
 email: {provider: resend, from: noreply@e2e.test, from_name: E2E Chat}
 defaults: {dns: live}
+# Strict on purpose so the e2e can trip them; run.zsh exempts the runner's own network.
+rate_limits: {auth_per_minute: 6, auth_burst: 2, api_per_second: 2, api_burst: 5, exempt_ranges: ["192.0.2.0/24"]}
 servers:
   dept:
     kind: dedicated

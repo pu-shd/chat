@@ -20,7 +20,7 @@ What protects a public Zulip server here once `ip_gate` is off, and whether Azur
 
 | Option | Adds | Approximate cost | Fit |
 |---|---|---|---|
-| **A. nginx rate limits** (`limit_req` in the app.d include) | Per-client-IP request budgets on login, sign-up, upload and API paths, in front of Django | $0 | Good first step. It stops a single-source flood, not a distributed one |
+| **A. nginx rate limits**: **implemented, on by default** (`rate_limits` in `chat.yml`) | Per-client-IP request budgets on sign-in, sign-up, API-key and API paths, in front of Django. Campus ranges exempt | $0 | Good first step. It stops a single-source flood, not a distributed one |
 | **B. Front Door Standard + WAF custom rules** | Global anycast edge, with L3/4/7 DDoS absorbed at the edge at no extra cost. WAF **custom rules and rate-limit rules**, geo filtering, caching of Zulip's hashed `/static/` assets, TLS at the edge | $35/month base, plus about $0.009 per 10k requests and about $0.083/GB egress | **Recommended if the servers are ever targeted**, or as the default if public exposure worries you |
 | **C. Front Door Premium** | B, plus Microsoft-managed rule sets (DRS), bot manager, and **Private Link to the Container Apps environment**, which lets the app's public ingress be switched off | $330/month base, plus requests, egress and the private endpoint | For a department that needs managed OWASP rules or bot defence, or wants no public origin at all |
 | D. Application Gateway WAF v2 | Regional WAF (CRS 3.2 / DRS, bodies to 2 MB, files to 4 GB) | About $300–400/month | Needs an **internal** Container Apps environment, which cannot be switched from external: the platform would have to be rebuilt. Not recommended here |
@@ -46,7 +46,7 @@ What protects a public Zulip server here once `ip_gate` is off, and whether Azur
 
 ## Recommendation
 
-- **Now (free):** drop the IP gate where it gets in the way (`ip_gate.enabled: false`), and add **Option A**: nginx `limit_req` budgets for `/accounts/login`, `/accounts/register`, `/api/v1/fetch_api_key`, `/json/*` and `/api/v1/*`, keyed on the real client IP. Together with Entra-only sign-in, Zulip's own limits and Azure's platform DDoS protection, that is proportionate for departmental chat.
+- **Now (free), done:** drop the IP gate where it gets in the way (`ip_gate.enabled: false`) and rely on **Option A**, the per-client-IP `limit_req` budgets now built into the image (`rate_limits`). Together with Entra-only sign-in, Zulip's own limits and Azure's platform DDoS protection, that is proportionate for departmental chat.
 - **If a server is targeted, or before exposing a high-profile one:** add **Option B**, Front Door Standard with WAF rate-limit rules and origin lock by backend-range allowlist plus `X-Azure-FDID`. It is the cheapest way to move volumetric and L7 floods off the single replica, at about $35/month plus traffic for the whole department. One profile can front every server.
 - **Premium (Option C)** only if managed rule sets, bot manager or a fully private origin become requirements.
 

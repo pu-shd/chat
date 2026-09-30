@@ -226,6 +226,25 @@ email:
 
 Switching from Resend to ACS or back is a `chat.yml` change plus a redeploy. The only extra step is `acs-email.zsh` when moving to ACS.
 
+## Per-client-IP request limits (on by default)
+
+Zulip's nginx limits each client IP, as resolved from the proxy's `X-Forwarded-For`, before a request reaches Django:
+
+```yaml
+rate_limits:              # defaults shown
+  enabled: true
+  auth_per_minute: 20     # /accounts/login|register|password|find|…, /complete/, /api/v1/fetch_api_key, …
+  auth_burst: 30
+  api_per_second: 50      # /api/ and /json/ (includes the long-polling event queue)
+  api_burst: 500
+  exempt_ranges: [...]    # default: the campus ranges; never limited
+```
+
+- Over the limit, nginx answers **429**, which Zulip's clients already handle by backing off.
+- The defaults are deliberately generous. Many VPN users share a few Prisma Access egress addresses, and an active client sends a request per action on top of its event poll. Tighten them for a department whose users are mostly on campus (exempt), or raise them if keepalive or users report 429s.
+- The image builds the nginx config from these numbers; it never takes nginx text. Malformed values switch the limits off with a loud log line rather than break nginx.
+- The e2e suite trips both limits against real Zulip nginx.
+
 ## The IP gate is optional, per server and per department
 
 - Servers are ungated by default (`ip_gate: false`).
