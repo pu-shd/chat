@@ -55,7 +55,7 @@ Themes ship in the image under `image/themes/<name>/theme.css`. Available now:
 
 ## Adding a theme
 
-Copy `image/themes/paper-tiger/` to a new name and change the `--pt-*` palette at the top. Then release the template; config repos select it with `theme: <name>`. The rules are in `image/themes/README.md`.
+Copy `image/themes/paper-tiger/` to a new name and change the `--pt-*` palette at the top. Preview it before releasing with `scripts/local.zsh up --config <dept> --theme <name>`, which builds the image from your checkout (see the README, "Looking at it locally"). Then release the template; config repos select it with `theme: <name>`. The rules are in `image/themes/README.md`.
 
 ## What does not change
 

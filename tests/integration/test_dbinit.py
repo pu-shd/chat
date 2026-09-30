@@ -33,6 +33,17 @@ def dbinit(tmp_path, name: str, password: str, action="ensure", admin_password="
     return subprocess.run(["sh", str(SCRIPT)], env=env, capture_output=True, text=True)
 
 
+@pytest.fixture(autouse=True, scope="module")
+def fresh_databases(tmp_path_factory):
+    """`docker-compose run --rm tests` leaves the postgres service up between runs; start
+    every run from no test databases, or a leftover one makes the next run fail or pass
+    for the wrong reason."""
+    tmp = tmp_path_factory.mktemp("dbinit-reset")
+    for i in range(1, 6):
+        r = dbinit(tmp, f"zulip_t{i}", "reset", action="drop")
+        assert r.returncode == 0, r.stderr + r.stdout
+
+
 def test_admin_is_not_superuser():
     assert psql("SELECT rolsuper FROM pg_roles WHERE rolname = current_user") == "f"
 

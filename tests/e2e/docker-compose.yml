@@ -154,12 +154,12 @@ networks:
   e2e: {}
 
 secrets:
-  hc_ping_key: {file: .state/secrets/hc_ping_key}
-  pg_admin_password: {file: .state/secrets/pg_admin_password}
-  zulip__secret_key: {file: .state/secrets/zulip__secret_key}
-  zulip__postgres_password: {file: .state/secrets/zulip__postgres_password}
-  zulip__redis_password: {file: .state/secrets/zulip__redis_password}
-  zulip__rabbitmq_password: {file: .state/secrets/zulip__rabbitmq_password}
-  zulip__memcached_password: {file: .state/secrets/zulip__memcached_password}
-  zulip__social_auth_oidc_secret: {file: .state/secrets/zulip__social_auth_oidc_secret}
-  zulip__email_password: {file: .state/secrets/zulip__email_password}
+  hc_ping_key: {file: "${CHAT_E2E_STATE:-.state}/secrets/hc_ping_key"}
+  pg_admin_password: {file: "${CHAT_E2E_STATE:-.state}/secrets/pg_admin_password"}
+  zulip__secret_key: {file: "${CHAT_E2E_STATE:-.state}/secrets/zulip__secret_key"}
+  zulip__postgres_password: {file: "${CHAT_E2E_STATE:-.state}/secrets/zulip__postgres_password"}
+  zulip__redis_password: {file: "${CHAT_E2E_STATE:-.state}/secrets/zulip__redis_password"}
+  zulip__rabbitmq_password: {file: "${CHAT_E2E_STATE:-.state}/secrets/zulip__rabbitmq_password"}
+  zulip__memcached_password: {file: "${CHAT_E2E_STATE:-.state}/secrets/zulip__memcached_password"}
+  zulip__social_auth_oidc_secret: {file: "${CHAT_E2E_STATE:-.state}/secrets/zulip__social_auth_oidc_secret"}
+  zulip__email_password: {file: "${CHAT_E2E_STATE:-.state}/secrets/zulip__email_password"}

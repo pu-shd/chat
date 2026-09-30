@@ -144,6 +144,25 @@ https://orfe-chat-groups.<environment-default-domain>/    ← the shared server'
 
 **Limit on the shared server:** only its `preview_realm` is reachable before DNS, because one Container App name maps to one realm. The other group realms are still created; they become reachable when their CNAMEs exist.
 
+## Looking at it locally (no Azure, no Entra)
+
+`scripts/local.zsh` runs one server from a `chat.yml` on your machine, so you can click around a department's workspace (theme, realm name, login page, redirects, mail) before anything exists in Azure. It needs Docker, `docker-compose` and `scripts/setup-venv.zsh`.
+
+```zsh
+scripts/local.zsh up --config ../chat-config/orfe                    # the dept server
+scripts/local.zsh up --config ../chat-config/orfe --server groups    # or one server at a time
+scripts/local.zsh up --config ../chat-config/orfe --theme default    # compare with Zulip's look
+scripts/local.zsh status | logs | trust | down
+```
+
+- It builds the image from **this checkout**, so uncommitted theme or image changes show up. The settings come from `render.py` exactly as a deploy would produce them. Only the host names change, and the services point at local containers: PostgreSQL (with a non-superuser admin, like Azure's), the sidecars, a mock Entra and a mail sink.
+- **Hosts** become `<host>.localhost`, for example `https://chat.orfe.princeton.edu.localhost/`. macOS resolves every `*.localhost` name to 127.0.0.1 by itself, so `/etc/hosts` needs no edits.
+- **Sign-in:** "Log in with Microsoft" goes to a mock Entra at `http://login.localhost:9080` that signs you straight in as the realm owner from `chat.yml`. Nothing contacts Princeton's tenant.
+- **Mail** Zulip sends (invitations, for example) shows up at `http://localhost:8025`.
+- **TLS** comes from a local CA (Caddy, standing in for Container Apps ingress). Accept the browser warning, or run `local.zsh trust` once to trust that CA in your login keychain; remove it from Keychain Access after `down`. Firefox uses its own certificate store.
+- Ports 443, 9080 and 8025 on 127.0.0.1 must be free. `up` is idempotent and keeps data. `down` deletes it.
+- Not reproduced locally: the IP gate, Easy Auth, Healthchecks and Azure networking. The shared server's realms each get their own `<slug>.….localhost` host.
+
 ## Going live: CNAMEs for OIT
 
 ```zsh

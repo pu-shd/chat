@@ -7,3 +7,4 @@ dns-request-*.md
 # Test fixtures (fake signature material) must be committed despite global *.pem ignores.
 !tests/fixtures/**/*.pem
 .chat-bootstrap/
+.local-stack/

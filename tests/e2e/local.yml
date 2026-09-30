@@ -1,0 +1,28 @@
+# Local stack (scripts/local.zsh): the e2e services plus what a browser on this machine
+# needs. Overlaid on docker-compose.yml, then on the generated override.json.
+#   edge     Caddy with its own local CA, standing in for Container Apps ingress (TLS,
+#            X-Forwarded-*), on https://<host>.localhost
+#   oidc     the mock Entra, at the same URL for the browser and for Zulip
+#   mailpit  web UI for the mail Zulip sends (invitations, notifications)
+# Published on 127.0.0.1 only.
+services:
+  edge:
+    image: caddy:2.10-alpine
+    volumes:
+      - ${CHAT_E2E_STATE:?}/Caddyfile:/etc/caddy/Caddyfile:ro
+      - edge-data:/data
+    ports: ["127.0.0.1:443:443"]
+    depends_on: [zulip]
+    networks: [e2e]
+
+  oidc:
+    ports: ["127.0.0.1:9080:9080"]
+    networks:
+      e2e:
+        aliases: [login.localhost]
+
+  mailpit:
+    ports: ["127.0.0.1:8025:8025"]
+
+volumes:
+  edge-data:

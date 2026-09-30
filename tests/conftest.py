@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import render  # noqa: E402
 
-SHIMMED = ["az", "gh", "cosign", "dig", "curl"]
+SHIMMED = ["az", "gh", "cosign", "dig", "curl", "docker", "docker-compose", "lsof"]
 
 
 class Dept:
