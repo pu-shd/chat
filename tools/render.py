@@ -239,6 +239,7 @@ def platform_spec(cfg: dict[str, Any]) -> dict[str, Any]:
             "environment": f"{prefix}-env",
             "key_vault": names.get("key_vault", f"{prefix}-kv"),
             "storage": names.get("storage", (compact + "data")[:24]),
+            "registry": names.get("registry", (compact + "acr")[:50]),
             "postgres": pg_name,
             "log_analytics": f"{prefix}-logs",
             "identity": f"{prefix}-id",
@@ -760,8 +761,14 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         raise ConfigError(f"{spec['name']}: no Entra client id (pin entra.client_id or pass --oidc-client-id)")
     if not re.fullmatch(r"[0-9a-fA-F-]{36}", client_id):
         raise ConfigError(f"{spec['name']}: '{client_id}' is not an Entra client id")
-    if not args.image or "@sha256:" not in args.image and not args.allow_unpinned_image:
-        raise ConfigError("--image must be pinned by digest (name@sha256:...); pass --allow-unpinned-image for local tests")
+    registry = args.registry
+    if not re.fullmatch(r"[a-z0-9]{5,50}\.azurecr\.io", registry or ""):
+        raise ConfigError(f"--registry must be the department's <name>.azurecr.io login server, not {registry!r}")
+    # Only images built into (or imported to) the department's own registry, by digest.
+    if not re.fullmatch(rf"{re.escape(registry)}/chat@sha256:[0-9a-f]{{64}}", args.image or "") and not args.allow_unpinned_image:
+        raise ConfigError(f"--image must be {registry}/chat@sha256:<digest> (build-image.zsh); pass --allow-unpinned-image for local tests")
+    sidecars = {k: f"{registry}/{v.removeprefix('docker.io/')}"
+                for k, v in json.loads((TEMPLATE_ROOT / "image" / "sidecars.json").read_text()).items() if not k.startswith("_")}
     if "{{acs_mail_from}}" in json.dumps(spec["settings"]) and not args.acs_mail_from:
         raise ConfigError(f"{spec['name']}: ACS Azure-managed domain: pass --acs-mail-from DoNotReply@<domain>")
     if args.acs_mail_from and not re.fullmatch(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+", args.acs_mail_from):
@@ -804,6 +811,8 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         "zulipCpu": f"{spec['cpu'] - 0.75:g}",
         "zulipMemory": f"{spec['cpu'] * 2 - 1.5:g}Gi",
         "image": args.image,
+        "registryServer": registry,
+        "sidecarImages": sidecars,
         "zulipEnv": [{"name": k, "value": v} for k, v in sorted(settings.items())],
         "keyVaultSecretNames": spec["key_vault_secrets"],
         "customDomains": custom_domains,
@@ -854,7 +863,8 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("resolve")
     s.add_argument("--server", required=True, help="generated/servers/<name>.json")
     s.add_argument("--default-domain", required=True, help="Container Apps environment default domain")
-    s.add_argument("--image", required=True)
+    s.add_argument("--image", required=True, help="<registry>/chat@sha256:... from build-image.zsh")
+    s.add_argument("--registry", required=True, help="the department ACR login server, <name>.azurecr.io")
     s.add_argument("--allow-unpinned-image", action="store_true")
     s.add_argument("--oidc-client-id")
     s.add_argument("--custom-domains", help="JSON array of live customDomains to preserve")

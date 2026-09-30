@@ -1,8 +1,12 @@
 #!/usr/bin/env zsh
 # deploy-server.zsh — create or update one Zulip server (infra/server.bicep).
 #
-#   scripts/deploy-server.zsh --config <dept-dir> --server <name> --image <ref@sha256:...>
-#                             [--allow-unpinned-image] [--skip-realms] [--dry-run] [--yes]
+#   scripts/deploy-server.zsh --config <dept-dir> --server <name> [--lock <template.lock>]
+#                             [--image <registry>/chat@sha256:...] [--allow-unpinned-image]
+#                             [--skip-realms] [--dry-run] [--yes]
+#
+# The image defaults to the department registry's chat:<ref>-<sha7> for template.lock
+# (build it first with build-image.zsh), deployed by digest.
 #
 # Order, and why:
 #   1. per-server secrets exist in Key Vault (generated once, never replaced); operator
@@ -19,34 +23,37 @@
 # Works before DNS exists: with dns: pending the server answers on
 # https://<app>.<environment default domain>/ and that is what it is configured for.
 source "${0:A:h}/common.zsh"
-IMAGE="${CHAT_IMAGE:-}" ALLOW_UNPINNED=false SKIP_REALMS=false
+IMAGE="${CHAT_IMAGE:-}" LOCK="" ALLOW_UNPINNED=false SKIP_REALMS=false
 parse_common_args "$@"
 set -- "${CHAT_ARGS_REST[@]}"
 while (( $# )); do
   case "$1" in
     --image) IMAGE="${2:?}"; shift 2 ;;
+    --lock) LOCK="${2:?}"; shift 2 ;;
     --allow-unpinned-image) ALLOW_UNPINNED=true; shift ;;
     --skip-realms) SKIP_REALMS=true; shift ;;
     *) die "unknown argument: $1" ;;
   esac
 done
-[[ -n "$IMAGE" ]] || die "--image is required (template.lock's image@digest)"
-[[ "$IMAGE" == *@sha256:* ]] || $ALLOW_UNPINNED || die "--image must be pinned by digest: $IMAGE"
 load_platform
 load_server
 az_login
 
-# The image must be one pu-shd/chat's release workflow built and signed.
-if command -v cosign >/dev/null 2>&1 && [[ "${CHAT_SKIP_IMAGE_SIGNATURE:-}" != 1 ]]; then
-  cosign verify "$IMAGE" --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-    --certificate-identity-regexp "${CHAT_IMAGE_SIGNER_RE:-^https://github\.com/pu-shd/chat/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+\$}" \
-    >/dev/null 2>&1 || die "image signature did not verify: $IMAGE"
-  log_ok "image signature verified"
-elif [[ "${CHAT_REQUIRE_IMAGE_SIGNATURE:-}" == 1 ]]; then
-  die "cosign is required to verify $IMAGE"
-else
-  log_warn "cosign not installed: image signature not verified (CI always verifies)"
+# The image is the one build-image.zsh built into this department's registry from the
+# pinned template commit (tag chat:<ref>-<sha7>, locked); deploy it by digest.
+ACR="$(jqp .names.registry)"
+REGISTRY="$(az acr show -n "$ACR" -g "$RG" --query loginServer -o tsv 2>/dev/null || true)"
+[[ -n "$REGISTRY" ]] || die "registry $ACR not found; run deploy-platform.zsh first"
+if [[ -z "$IMAGE" ]]; then
+  LOCK="${LOCK:-$CONFIG_DIR/../template.lock}"
+  [[ -f "$LOCK" ]] || die "no --image and no template.lock at $LOCK"
+  TAG="chat:$(jq -er .ref "$LOCK")-$(jq -er .sha "$LOCK" | cut -c1-7)"
+  DIGEST="$(az acr repository show -n "$ACR" --image "$TAG" --query digest -o tsv 2>/dev/null || true)"
+  [[ "$DIGEST" == sha256:* ]] || die "$REGISTRY/$TAG is not built yet; run build-image.zsh --config $CONFIG_DIR"
+  IMAGE="$REGISTRY/chat@$DIGEST"
 fi
+[[ "$IMAGE" == "$REGISTRY/chat@sha256:"* ]] || $ALLOW_UNPINNED || die "image must come from $REGISTRY by digest: $IMAGE"
+log_ok "image $IMAGE"
 
 log_step "Server $SERVER → $APP_NAME ($(jqs .kind), dns: $(jqs .dns))"
 az containerapp env show -g "$RG" -n "$ENV_NAME" --query id -o tsv >/dev/null 2>&1 \
@@ -77,7 +84,15 @@ for kind in app db; do
       || no_access+=("$ident → $s")
   done
 done
-(( ${#no_access} == 0 )) || die "missing Key Vault access: ${(j:, :)no_access} — an operator runs grant-access.zsh --config $CONFIG_DIR --server $SERVER"
+ACR_ID="$(az acr show -n "$ACR" -g "$RG" --query id -o tsv)"
+for kind in app db; do
+  ident="$(jqs ".identities.$kind.name")"
+  pid="$(az identity show -g "$RG" -n "$ident" --query principalId -o tsv 2>/dev/null || true)"
+  [[ -z "$pid" ]] && continue
+  [[ -n "$(az role assignment list --assignee "$pid" --scope "$ACR_ID" --role AcrPull --query '[0].id' -o tsv 2>/dev/null)" ]] \
+    || no_access+=("$ident → AcrPull on $ACR")
+done
+(( ${#no_access} == 0 )) || die "missing access: ${(j:, :)no_access} — an operator runs grant-access.zsh --config $CONFIG_DIR --server $SERVER"
 CLIENT_ID="$(jq -r '.entra.client_id // empty' "$SERVER_JSON")"
 if [[ -z "$CLIENT_ID" ]]; then
   CLIENT_ID="$(kv_secret_get "$SERVER-oidc-client-id" 2>/dev/null || true)"
@@ -123,7 +138,7 @@ params() {  # params <deployApp true|false> -> path of a resolved ARM parameters
   $ALLOW_UNPINNED && extra+=(--allow-unpinned-image)
   [[ -n "$ACS_MAIL_FROM" ]] && extra+=(--acs-mail-from "$ACS_MAIL_FROM")
   "$CHAT_PY" "$CHAT_RENDER" resolve --server "$SERVER_JSON" --default-domain "$DOMAIN" \
-    --image "$IMAGE" --oidc-client-id "$CLIENT_ID" --custom-domains "$CUSTOM_DOMAINS" \
+    --image "$IMAGE" --registry "$REGISTRY" --oidc-client-id "$CLIENT_ID" --custom-domains "$CUSTOM_DOMAINS" \
     --ip-rules "$IP_RULES" --deploy-app "$1" "${extra[@]}" > "$f"
   print -r -- "$f"
 }

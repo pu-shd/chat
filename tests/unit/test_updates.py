@@ -47,7 +47,7 @@ def web(monkeypatch):
 @pytest.fixture
 def tree(tmp_path):
     """A copy of the parts of the template updates.py rewrites."""
-    for rel in ["image/Dockerfile", "infra/server.bicep", "tests/Dockerfile"]:
+    for rel in ["image/Dockerfile", "image/sidecars.json", "tests/Dockerfile"]:
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(ROOT / rel, tmp_path / rel)
     df = tmp_path / "image/Dockerfile"
@@ -112,9 +112,9 @@ def test_sidecars_stay_within_their_major(web, tree, capsys):
             "library/postgres": ["17-alpine", "18-alpine"]}
     registry(web, zulip_tags=["12.3-0"], digest=D_OLD, sidecar_tags=tags)
     code, out = run_zulip(tree, capsys)
-    bicep = (tree / "infra/server.bicep").read_text()
-    assert "docker.io/library/redis:7.10-alpine" in bicep
-    assert "docker.io/library/postgres:17-alpine" in bicep
+    sidecars = (tree / "image/sidecars.json").read_text()
+    assert "docker.io/library/redis:7.10-alpine" in sidecars
+    assert "docker.io/library/postgres:17-alpine" in sidecars
     assert "redis 8.2-alpine is a new major version — not applied" in out.out
     assert "postgres 18-alpine is a new major version" in out.out
 
@@ -162,7 +162,7 @@ def release(web, tag, image, asset=True, sha=SHA_NEW, tag_sha=None):
     rel = {"tag_name": tag, "html_url": f"https://github.com/pu-shd/chat/releases/tag/{tag}",
            "assets": [{"name": "template.lock", "browser_download_url": f"https://dl.example/{tag}/template.lock"}] if asset else []}
     web.add("api.github.com/repos/pu-shd/chat/releases/latest", rel)
-    web.add(f"https://dl.example/{tag}/template.lock", {"repo": "pu-shd/chat", "ref": tag, "sha": sha, "image": image})
+    web.add(f"https://dl.example/{tag}/template.lock", {"repo": "pu-shd/chat", "ref": tag, "sha": sha})
     web.add(f"api.github.com/repos/pu-shd/chat/commits/{tag}", {"sha": tag_sha or sha})
 
 
@@ -170,8 +170,7 @@ def test_template_bump_rewrites_lock_and_uses(web, config_repo, capsys):
     release(web, "v0.2.0", f"ghcr.io/pu-shd/chat:v0.2.0@{D_NEW}")
     assert updates.main(["template", "--config-repo", str(config_repo), "--apply"]) == 0
     lock = json.loads((config_repo / "template.lock").read_text())
-    assert lock == {"_note": "keep me", "repo": "pu-shd/chat", "ref": "v0.2.0", "sha": SHA_NEW,
-                    "image": f"ghcr.io/pu-shd/chat:v0.2.0@{D_NEW}"}
+    assert lock == {"_note": "keep me", "repo": "pu-shd/chat", "ref": "v0.2.0", "sha": SHA_NEW}  # image dropped
     wf = (config_repo / ".github/workflows/deploy.yml").read_text()
     assert wf.count(f"@{SHA_NEW} # v0.2.0") == 2 and "other/repo@v0.1.0" in wf
     assert "pu-shd/chat v0.1.0 → v0.2.0" in capsys.readouterr().out
@@ -199,7 +198,7 @@ def test_release_without_lock_asset_is_an_error(web, config_repo, capsys):
 
 
 def test_malformed_lock_asset_is_an_error(web, config_repo, capsys):
-    release(web, "v0.2.0", "ghcr.io/pu-shd/chat:v0.2.0")  # no digest
+    release(web, "v0.2.0", "x", sha="not-a-sha")
     assert updates.main(["template", "--config-repo", str(config_repo)]) == 1
     assert "malformed template.lock" in capsys.readouterr().err
 

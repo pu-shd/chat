@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import subprocess
 
-from conftest import az_basics
+from conftest import ROOT, az_basics
 from test_scripts import DOMAIN, IMAGE, deploy_rules
 
 API_KEY = "hc-API-SENTINEL-77"
@@ -243,6 +244,7 @@ def test_unknown_flag_rejected_before_anything(run, dept, shims):
 
 def grant_rules(sh, *, missing_secrets=(), existing_identity=False, granted=()):
     az_basics(sh)
+    sh.on("az", r"^acr show -n orfechatacr -g orfe-chat-rg --query id", "/subs/x/registries/orfechatacr")
     sh.on("az", r"^keyvault show -n orfe-chat-kv ", "/subs/x/vaults/orfe-chat-kv")
     sh.on("az", r"^keyvault secret show-deleted ", exit=3)
     for s in missing_secrets:
@@ -258,6 +260,8 @@ def grant_rules(sh, *, missing_secrets=(), existing_identity=False, granted=()):
     sh.on("az", r"^identity create ")
     for s in granted:
         sh.on("az", rf"^role assignment list .*/secrets/{s} ", "/ra/x")
+    if granted:
+        sh.on("az", r"^role assignment list .*--scope /subs/x/registries/orfechatacr --role AcrPull", "/ra/acr")
     sh.on("az", r"^role assignment list ", "")
     sh.on("az", r"^role assignment create ")
 
@@ -271,6 +275,9 @@ def test_grant_access_scopes_each_identity_to_its_own_secrets(run, dept, shims):
         "identity create -g orfe-chat-rg -n orfe-chat-dept-id -l canadacentral --tags chat-server=dept --output none",
         "identity create -g orfe-chat-rg -n orfe-chat-dept-db-id -l canadacentral --tags chat-server=dept --output none"]
     scopes = [c.split("--scope ")[1].split()[0] for c in calls if c.startswith("role assignment create")]
+    acr = [c for c in calls if c.startswith("role assignment create") and "--role AcrPull --scope /subs/x/registries/orfechatacr" in c]
+    assert len(acr) == 2  # both identities pull from the department registry
+    scopes = [x for x in scopes if "/registries/" not in x]
     base = "/subs/x/vaults/orfe-chat-kv/secrets/"
     assert scopes == [base + s for s in sorted([
         "dept-memcached-password", "dept-oidc-secret", "dept-postgres-password", "dept-rabbitmq-password",
@@ -379,3 +386,82 @@ def test_acs_verified_domain_gets_linked(run, dept, shims):
 def test_acs_refuses_without_acs_provider(run, dept, shims):
     r = run("acs-email.zsh", "--config", str(dept.path))
     assert r.returncode != 0 and "email.provider is not acs" in r.stderr
+
+
+# ---------------------------------------------------------------- build-image.zsh
+
+
+def build_rules(sh, *, built=False, sidecars_present=False):
+    az_basics(sh)
+    sh.on("az", r"^acr show -n orfechatacr -g orfe-chat-rg --query loginServer", "orfechatacr.azurecr.io")
+    if built:
+        sh.on("az", r"^acr repository show -n orfechatacr --image chat:", "sha256:" + "f" * 64)
+    else:
+        sh.on("az", r"^acr repository show -n orfechatacr --image chat:", exit=3, times=1)
+        sh.on("az", r"^acr repository show -n orfechatacr --image chat:", "sha256:" + "f" * 64)
+    sh.on("az", r"^acr repository show ", "sha256:" + "1" * 64 if sidecars_present else "", exit=0 if sidecars_present else 3)
+    sh.on("az", r"^acr build ")
+    sh.on("az", r"^acr import ")
+    sh.on("az", r"^acr repository update ")
+
+
+def template_at(tmp_path, sha, ref="v0.3.0"):
+    lock = tmp_path / "template.lock"
+    lock.write_text(json.dumps({"repo": "pu-shd/chat", "ref": ref, "sha": sha}))
+    return lock
+
+
+def fake_template(tmp_path):
+    """A git checkout of the template's image/ dir, so build-image.zsh can check its commit."""
+    import shutil
+    root = tmp_path / "tmpl"
+    shutil.copytree(ROOT / "image", root / "image")
+    shutil.copytree(ROOT / "scripts", root / "scripts")
+    shutil.copytree(ROOT / "tools", root / "tools")
+    shutil.copytree(ROOT / "schema", root / "schema")
+    g = lambda *a: subprocess.run(["git", "-C", str(root), *a], check=True, capture_output=True, text=True).stdout.strip()
+    g("init", "-q"); g("add", "-A")
+    g("-c", "user.name=t", "-c", "user.email=t@example.edu", "commit", "-qm", "t")
+    return root, g("rev-parse", "HEAD")
+
+
+def test_build_image_builds_once_locks_and_imports_sidecars(run, dept, shims, tmp_path):
+    root, sha = fake_template(tmp_path)
+    build_rules(shims)
+    r = run_in(root, run, "build-image.zsh", "--config", str(dept.path), "--lock", str(template_at(tmp_path, sha)))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "orfechatacr.azurecr.io/chat@sha256:" + "f" * 64
+    calls = shims.joined("az")
+    build = [c for c in calls if c.startswith("acr build")]
+    assert len(build) == 1 and f"-t chat:v0.3.0-{sha[:7]} --platform linux/amd64 --build-arg CHAT_TEMPLATE_SHA={sha}" in build[0]
+    imports = [c for c in calls if c.startswith("acr import")]
+    assert any("--source docker.io/library/redis:" in c and "--image library/redis:" in c for c in imports)
+    assert any("--source docker.io/curlimages/curl:" in c for c in imports) and len(imports) == 5
+    locks = [c for c in calls if c.startswith("acr repository update")]
+    assert all("--write-enabled false --delete-enabled false" in c for c in locks) and len(locks) == 6
+
+
+def test_build_image_reuses_an_existing_tag(run, dept, shims, tmp_path):
+    root, sha = fake_template(tmp_path)
+    build_rules(shims, built=True, sidecars_present=True)
+    r = run_in(root, run, "build-image.zsh", "--config", str(dept.path), "--lock", str(template_at(tmp_path, sha)))
+    assert r.returncode == 0, r.stderr
+    assert not any(c.startswith(("acr build", "acr import")) for c in shims.joined("az"))
+
+
+def test_build_image_refuses_a_checkout_that_is_not_the_locked_commit(run, dept, shims, tmp_path):
+    root, sha = fake_template(tmp_path)
+    build_rules(shims)
+    r = run_in(root, run, "build-image.zsh", "--config", str(dept.path), "--lock", str(template_at(tmp_path, "0" * 40)))
+    assert r.returncode != 0 and "template.lock pins 0000000" in r.stderr
+    (root / "image" / "Dockerfile").write_text("FROM evil\n")
+    r = run_in(root, run, "build-image.zsh", "--config", str(dept.path), "--lock", str(template_at(tmp_path, sha)))
+    assert r.returncode != 0 and "with changes in image/" in r.stderr
+    assert not any(c.startswith("acr build") for c in shims.joined("az"))
+
+
+def run_in(root, run, script, *args):
+    """Run a script from a different template checkout (CHAT_ROOT follows the script path)."""
+    import os
+    env = {"CHAT_ROOT": str(root)}
+    return run(script, *args, env=env)

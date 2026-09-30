@@ -11,7 +11,8 @@ import render
 import zulip_reserved
 
 DOMAIN = "happy-sea-123.canadacentral.azurecontainerapps.io"
-IMAGE = "ghcr.io/pu-shd/chat:v1@sha256:" + "a" * 64
+REGISTRY = "orfechatacr.azurecr.io"
+IMAGE = f"{REGISTRY}/chat@sha256:" + "a" * 64
 
 
 def rerender_error(dept, capsys) -> str:
@@ -23,7 +24,7 @@ def resolve(dept, server, capsys, *extra) -> dict:
     capsys.readouterr()  # drop output from any earlier render
     code = render.main([
         "resolve", "--server", str(dept.path / "generated" / "servers" / f"{server}.json"),
-        "--default-domain", DOMAIN, "--image", IMAGE, *extra,
+        "--default-domain", DOMAIN, "--image", IMAGE, "--registry", REGISTRY, "--registry", REGISTRY, *extra,
     ])
     out = capsys.readouterr()
     assert code == 0, out.err
@@ -290,26 +291,43 @@ def test_redirects_after_dns_point_at_live_hosts(dept, capsys):
 
 def test_resolve_refuses_unpinned_image(dept, capsys):
     code = render.main(["resolve", "--server", str(dept.path / "generated/servers/dept.json"),
-                        "--default-domain", DOMAIN, "--image", "ghcr.io/pu-shd/chat:latest"])
-    assert code == 2 and "pinned by digest" in capsys.readouterr().err
+                        "--default-domain", DOMAIN, "--image", "ghcr.io/pu-shd/chat:latest",
+                        "--registry", REGISTRY])
+    assert code == 2 and f"must be {REGISTRY}/chat@sha256" in capsys.readouterr().err
+
+
+def test_resolve_refuses_images_from_other_registries(dept, capsys):
+    code = render.main(["resolve", "--server", str(dept.path / "generated/servers/dept.json"), "--default-domain", DOMAIN,
+                        "--image", "evil.azurecr.io/chat@sha256:" + "a" * 64, "--registry", REGISTRY])
+    assert code == 2 and "must be" in capsys.readouterr().err
+    code = render.main(["resolve", "--server", str(dept.path / "generated/servers/dept.json"), "--default-domain", DOMAIN,
+                        "--image", IMAGE, "--registry", "ghcr.io"])
+    assert code == 2 and "--registry must be" in capsys.readouterr().err
+
+
+def test_sidecars_come_from_the_department_registry(dept, capsys):
+    p = resolve(dept, "dept", capsys)
+    side = p["sidecarImages"]["value"]
+    assert side["redis"].startswith(f"{REGISTRY}/library/redis:") and side["curl"].startswith(f"{REGISTRY}/curlimages/curl:")
+    assert p["registryServer"]["value"] == REGISTRY
 
 
 def test_resolve_needs_client_id(dept, capsys):
     code = render.main(["resolve", "--server", str(dept.path / "generated/servers/lab.json"),
-                        "--default-domain", DOMAIN, "--image", IMAGE, "--ip-rules", "[{}]"])
+                        "--default-domain", DOMAIN, "--image", IMAGE, "--registry", REGISTRY, "--ip-rules", "[{}]"])
     assert code == 2 and "no Entra client id" in capsys.readouterr().err
 
 
 def test_resolve_refuses_gated_server_without_rules(dept, capsys):
     code = render.main(["resolve", "--server", str(dept.path / "generated/servers/lab.json"),
-                        "--default-domain", DOMAIN, "--image", IMAGE,
+                        "--default-domain", DOMAIN, "--image", IMAGE, "--registry", REGISTRY, "--registry", REGISTRY,
                         "--oidc-client-id", "33333333-3333-3333-3333-333333333333"])
     assert code == 2 and "refusing to deploy it open" in capsys.readouterr().err
 
 
 def test_resolve_refuses_rules_for_ungated_server(dept, capsys):
     code = render.main(["resolve", "--server", str(dept.path / "generated/servers/dept.json"),
-                        "--default-domain", DOMAIN, "--image", IMAGE, "--ip-rules", '[{"name": "x"}]'])
+                        "--default-domain", DOMAIN, "--image", IMAGE, "--registry", REGISTRY, "--ip-rules", '[{"name": "x"}]'])
     assert code == 2 and "ip_gate is off" in capsys.readouterr().err
 
 
@@ -443,7 +461,7 @@ def test_acs_managed_domain_resolves_sender_at_deploy(dept, capsys):
     dept.render()
     assert "10/hour" in capsys.readouterr().err
     assert render.main(["resolve", "--server", str(dept.path / "generated/servers/dept.json"),
-                        "--default-domain", DOMAIN, "--image", IMAGE]) == 2
+                        "--default-domain", DOMAIN, "--image", IMAGE, "--registry", REGISTRY]) == 2
     assert "pass --acs-mail-from" in capsys.readouterr().err
     env = resolve(dept, "dept", capsys, "--acs-mail-from", "DoNotReply@1234abcd.azurecomm.net")["_env"]
     assert env["SETTING_NOREPLY_EMAIL_ADDRESS"] == "DoNotReply@1234abcd.azurecomm.net"

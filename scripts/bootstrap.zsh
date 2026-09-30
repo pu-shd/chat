@@ -1,13 +1,16 @@
 #!/usr/bin/env zsh
 # bootstrap.zsh — first deployment of a department, end to end, from an operator's Mac.
 #
-#   scripts/bootstrap.zsh --config <config-repo>/<dept> [--image ref@sha256:...]
+#   scripts/bootstrap.zsh --config <config-repo>/<dept> [--image <registry>/chat@sha256:...]
 #                         [--server name ...] [--from STEP] [--only STEP]
 #                         [--set-gh-vars] [--yes]
 #
 # Steps (each idempotent; rerun with --from to resume after fixing something):
 #   prereqs   tools, Python venv, Azure login, chat.yml renders cleanly
-#   platform  deploy-platform.zsh — RG, Key Vault, network, environment, PostgreSQL, storage
+#   platform  deploy-platform.zsh — RG, Key Vault, network, environment, PostgreSQL, storage,
+#             container registry
+#   image     build-image.zsh — Zulip image built in the registry from template.lock's
+#             commit (this checkout must be that commit); sidecar images imported
 #   github    setup-github-oidc.zsh — CI identity (+ GitHub Environment vars with --set-gh-vars)
 #   secrets   Resend API key → Key Vault (or, with email.provider acs, acs-email.zsh:
 #             SMTP credentials + domain verification); optional PUGWIPS_READ_TOKEN;
@@ -28,7 +31,7 @@
 #   2. scripts/bind-domain.zsh --config <dept> --server <name> [--wait 30]
 #   3. set dns: live for that server in chat.yml, render, rerun entra-app.zsh, push.
 source "${0:A:h}/common.zsh"
-STEPS=(prereqs platform github secrets entra access servers healthchecks smoke dns)
+STEPS=(prereqs platform image github secrets entra access servers healthchecks smoke dns)
 FROM="" ONLY="" IMAGE="${CHAT_IMAGE:-}" SET_GH_VARS=false
 typeset -a ONLY_SERVERS
 parse_common_args "$@"
@@ -78,16 +81,19 @@ REDIRECT_HOST="$(jq -r '.redirect_host // empty' "$CONFIG_DIR/generated/index.js
 if [[ -n "$REDIRECT_HOST" && ${SERVERS[(Ie)$REDIRECT_HOST]} -gt 0 ]]; then
   SERVERS=("${(@)SERVERS:#$REDIRECT_HOST}" "$REDIRECT_HOST")
 fi
-if [[ -z "$IMAGE" && -f "$CONFIG_DIR/../template.lock" ]]; then
-  IMAGE="$(jq -er .image "$CONFIG_DIR/../template.lock")"
-fi
 az_login
-log_info "department $DEPT, servers: ${SERVERS[*]}, image: ${IMAGE:-<unset>}"
+log_info "department $DEPT, servers: ${SERVERS[*]}, image: ${IMAGE:-built from template.lock}"
 
 # ------------------------------------------------------------------ platform
 if run_step platform; then
   log_step "platform"
   "$S/deploy-platform.zsh" --config "$CONFIG_DIR" "${YES[@]}"
+fi
+
+# ------------------------------------------------------------------ image
+if run_step image; then
+  log_step "image"
+  "$S/build-image.zsh" --config "$CONFIG_DIR" >/dev/null
 fi
 
 # ------------------------------------------------------------------ github
@@ -176,10 +182,10 @@ fi
 
 # ------------------------------------------------------------------ servers
 if run_step servers; then
-  [[ -n "$IMAGE" ]] || die "no image: pass --image ref@sha256:... or keep template.lock beside the department directory"
+  img_args=(); [[ -n "$IMAGE" ]] && img_args=(--image "$IMAGE")
   for s in "${SERVERS[@]}"; do
     log_step "server: $s"
-    "$S/deploy-server.zsh" --config "$CONFIG_DIR" --server "$s" --image "$IMAGE" "${YES[@]}"
+    "$S/deploy-server.zsh" --config "$CONFIG_DIR" --server "$s" "${img_args[@]}" "${YES[@]}"
   done
   # Redirects are resolved at deploy time; if the redirect host went first on an earlier
   # run, its /<slug> targets may have been skipped. Redeploying it is cheap and idempotent.

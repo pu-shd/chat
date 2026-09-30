@@ -12,8 +12,9 @@ import pytest
 from conftest import ROOT, az_basics
 
 DOMAIN = "happy-sea-123.canadacentral.azurecontainerapps.io"
-IMAGE = "ghcr.io/pu-shd/chat:v1@sha256:" + "b" * 64
-OLD_IMAGE = "ghcr.io/pu-shd/chat:v0@sha256:" + "c" * 64
+REGISTRY = "orfechatacr.azurecr.io"
+IMAGE = f"{REGISTRY}/chat@sha256:" + "b" * 64
+OLD_IMAGE = f"{REGISTRY}/chat@sha256:" + "c" * 64
 VERIFY_ID = "ABCDEF0123456789"
 
 
@@ -49,7 +50,8 @@ def test_dbinit_parses_as_posix_sh():
 
 def deploy_rules(sh, *, live_image=OLD_IMAGE, missing=(), custom_domains=None, no_identity=(), no_access=()):
     az_basics(sh)
-    sh.on("cosign", r"^verify ghcr\.io/pu-shd/chat:v1@sha256:.* --certificate-identity-regexp \^https://github\\\.com/pu-shd/chat/")
+    sh.on("az", r"^acr show -n orfechatacr -g orfe-chat-rg --query loginServer", REGISTRY)
+    sh.on("az", r"^acr show -n orfechatacr -g orfe-chat-rg --query id", "/subs/x/registries/orfechatacr")
     sh.on("az", r"^containerapp env show -g orfe-chat-rg -n orfe-chat-env --query id", "/env")
     for name in missing:
         sh.on("az", rf"^keyvault secret show --vault-name orfe-chat-kv --name {name} --query id", exit=3)
@@ -198,10 +200,11 @@ def test_missing_operator_secret_stops_before_any_deployment(run, dept, shims):
     assert not any(c.startswith("deployment ") for c in shims.joined("az"))
 
 
-def test_unpinned_image_refused_before_touching_azure(run, dept, shims):
-    r = run("deploy-server.zsh", "--config", str(dept.path), "--server", "dept", "--image", "ghcr.io/pu-shd/chat:latest")
-    assert r.returncode != 0 and "pinned by digest" in r.stderr
-    assert shims.calls() == []
+def test_unpinned_image_refused_before_any_deployment(run, dept, shims):
+    deploy_rules(shims)
+    r = run("deploy-server.zsh", "--config", str(dept.path), "--server", "dept", "--image", f"{REGISTRY}/chat:latest")
+    assert r.returncode != 0 and "by digest" in r.stderr
+    assert not any(c.startswith("deployment ") for c in shims.joined("az"))
 
 
 def test_stale_generated_refused(run, dept, shims):
@@ -424,7 +427,7 @@ def test_smoke_fails_on_wrong_redirect(run, dept, shims):
 
 def test_bootstrap_rejects_unknown_step(run, dept):
     r = run("bootstrap.zsh", "--config", str(dept.path), "--from", "bogus")
-    assert r.returncode != 0 and "unknown step 'bogus'" in r.stderr and "prereqs platform github" in r.stderr
+    assert r.returncode != 0 and "unknown step 'bogus'" in r.stderr and "prereqs platform image github" in r.stderr
 
 
 def test_bootstrap_dns_step_writes_ticket_with_redirect_host_last(run, dept, shims, tmp_path):
@@ -453,7 +456,7 @@ def entrypoint(tmp_path, b64: str | None):
 def test_entrypoint_installs_rendered_redirects(dept, capsys, tmp_path):
     import render
     render.main(["resolve", "--server", str(dept.path / "generated/servers/dept.json"), "--default-domain", DOMAIN,
-                 "--image", IMAGE])
+                 "--image", IMAGE, "--registry", REGISTRY])
     params = json.loads(capsys.readouterr().out)["parameters"]
     b64 = next(e["value"] for e in params["zulipEnv"]["value"] if e["name"] == "CHAT_REDIRECTS_B64")
     r, conf = entrypoint(tmp_path, b64)
@@ -482,55 +485,31 @@ def test_entrypoint_rejects_bad_base64_and_clears_when_unset(tmp_path):
     assert r.returncode == 0 and not conf.exists()
 
 
-def test_unsigned_image_is_refused(run, dept, shims):
-    shims.on("cosign", r"^verify ", exit=1)
+def test_image_from_another_registry_is_refused(run, dept, shims):
     deploy_rules(shims)
-    r = deploy(run, dept)
-    assert r.returncode != 0 and "image signature did not verify" in r.stderr
+    r = run("deploy-server.zsh", "--config", str(dept.path), "--server", "dept",
+            "--image", "evil.azurecr.io/chat@sha256:" + "e" * 64)
+    assert r.returncode != 0 and f"image must come from {REGISTRY} by digest" in r.stderr
     assert not any(c.startswith("deployment ") for c in shims.joined("az"))
 
 
-# ---------------------------------------------------------------- rate limits (entrypoint)
+def test_default_image_is_the_locked_tag_in_the_registry(run, dept, shims, tmp_path):
+    lock = tmp_path / "template.lock"
+    lock.write_text(json.dumps({"repo": "pu-shd/chat", "ref": "v0.3.0", "sha": "abcdef1" + "0" * 33}))
+    shims.on("az", r"^acr repository show -n orfechatacr --image chat:v0\.3\.0-abcdef1 --query digest", "sha256:" + "d" * 64)
+    deploy_rules(shims)
+    r = run("deploy-server.zsh", "--config", str(dept.path), "--server", "dept", "--lock", str(lock))
+    assert r.returncode == 0, r.stderr
+    app_call = next(c for c in shims.calls("az") if "chat-dept-app" in " ".join(c["args"]))
+    params = json.loads(next(iter(app_call["at_files"].values())))["parameters"]
+    assert params["image"]["value"] == f"{REGISTRY}/chat@sha256:" + "d" * 64
+    assert params["registryServer"]["value"] == REGISTRY
 
 
-def limits(tmp_path, limits_env: str | None, exempt: str | None = None):
-    h, s = tmp_path / "conf.d" / "chat-rate-limits.conf", tmp_path / "app.d" / "chat-rate-limits.conf"
-    env = {**os.environ, "CHAT_ENTRYPOINT_TEST": "1", "CHAT_REDIRECTS_CONF": str(tmp_path / "r.conf"),
-           "CHAT_RATE_HTTP_CONF": str(h), "CHAT_RATE_SERVER_CONF": str(s)}
-    if limits_env is not None:
-        env["CHAT_RATE_LIMITS"] = limits_env
-    if exempt is not None:
-        env["CHAT_RATE_LIMIT_EXEMPT"] = exempt
-    r = subprocess.run(["bash", str(ROOT / "image" / "bin" / "chat-entrypoint")], env=env, capture_output=True, text=True)
-    return r, h, s
-
-
-def test_rate_limits_generated_from_parameters(tmp_path):
-    r, h, s = limits(tmp_path, "auth:20r/m:30,api:50r/s:500", "128.112.0.0/16 140.180.0.0/16")
-    assert r.returncode == 0 and "rate limits auth 20r/m (burst 30), api 50r/s (burst 500), 2 exempt" in r.stdout
-    http = h.read_text()
-    assert "limit_req_zone $chat_rl_auth_key zone=chat_auth:10m rate=20r/m;" in http
-    assert "limit_req_zone $chat_rl_api_key zone=chat_api:20m rate=50r/s;" in http
-    assert "    128.112.0.0/16 1;\n    140.180.0.0/16 1;\n" in http and "limit_req_status 429;" in http
-    assert s.read_text().splitlines()[1:] == ["limit_req zone=chat_auth burst=30 nodelay;",
-                                             "limit_req zone=chat_api burst=500 nodelay;"]
-
-
-@pytest.mark.parametrize("bad, exempt", [
-    ("auth:20r/m:30", ""),                                  # api part missing
-    ("auth:20r/m:30,api:50r/s:500;include /etc/x", ""),     # anything extra
-    ("auth:20r/h:30,api:50r/s:500", ""),                    # no per-hour in nginx
-    ("auth:20r/m:30,api:50r/s:500", "128.112.0.0/16 evil;"),
-    ("auth:20r/m:30,api:50r/s:500", "10.0.0.0/33"),
-])
-def test_malformed_rate_limits_are_refused_and_nothing_is_installed(tmp_path, bad, exempt):
-    r, h, s = limits(tmp_path, bad, exempt)
-    assert r.returncode == 0  # never blocks Zulip from starting
-    assert "rate limits OFF" in r.stderr
-    assert not h.exists() and not s.exists()
-
-
-def test_rate_limits_off_removes_old_files(tmp_path):
-    limits(tmp_path, "auth:20r/m:30,api:50r/s:500", "")
-    r, h, s = limits(tmp_path, None)
-    assert "rate limits off" in r.stdout and not h.exists() and not s.exists()
+def test_unbuilt_image_stops_the_deploy(run, dept, shims, tmp_path):
+    lock = tmp_path / "template.lock"
+    lock.write_text(json.dumps({"repo": "pu-shd/chat", "ref": "v0.3.0", "sha": "abcdef1" + "0" * 33}))
+    shims.on("az", r"^acr repository show ", exit=3)
+    deploy_rules(shims)
+    r = run("deploy-server.zsh", "--config", str(dept.path), "--server", "dept", "--lock", str(lock))
+    assert r.returncode != 0 and "chat:v0.3.0-abcdef1 is not built yet" in r.stderr

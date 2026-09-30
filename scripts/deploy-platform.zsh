@@ -86,6 +86,7 @@ kv_secret_get pg-admin-password | jq -Rs --slurpfile p "$PLATFORM_JSON" --argjso
     location: {value: $p[0].region},
     environmentName: {value: $p[0].names.environment},
     storageAccountName: {value: $p[0].names.storage},
+    registryName: {value: $p[0].names.registry},
     postgresName: {value: $p[0].names.postgres},
     logAnalyticsName: {value: $p[0].names.log_analytics},
     identityName: {value: $p[0].names.identity},
@@ -117,6 +118,7 @@ VERIFY_ID="$(print -r -- "$OUT" | jq -er .customDomainVerificationId.value)"
 print -r -- "  environment default domain : $DEFAULT_DOMAIN"
 print -r -- "  custom domain verification : $VERIFY_ID"
 print -r -- "  static inbound IP          : $(print -r -- "$OUT" | jq -r .staticIp.value)"
+print -r -- "  container registry         : $(print -r -- "$OUT" | jq -r .registryLoginServer.value)"
 summary "### Platform \`$RG\`"
 summary "- default domain: \`$DEFAULT_DOMAIN\` — servers are reachable at \`<app>.$DEFAULT_DOMAIN\` before any DNS exists"
 summary "- asuid TXT value for custom domains: \`$VERIFY_ID\`"

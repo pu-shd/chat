@@ -3,12 +3,12 @@
 
     updates.py zulip [--apply] [--root DIR]
         pu-shd/chat itself: the Zulip image (image/Dockerfile, tag + digest), the
-        sidecar images in infra/server.bicep (newest release in the SAME major only;
+        sidecar images in image/sidecars.json (newest release in the SAME major only;
         newer majors are reported, never applied), and the bicep CLI in tests/Dockerfile.
         With a new Zulip version it also regenerates tools/zulip_reserved.py.
     updates.py template --config-repo DIR [--apply]
         a config repo: the latest pu-shd/chat release. Rewrites template.lock (from the
-        release's template.lock asset: ref, commit sha, image@digest) and pins every
+        release's template.lock asset: ref and commit sha) and pins every
         `uses: pu-shd/chat/...@<sha> # <tag>`. Refuses a release whose tag has moved.
     updates.py pugwips --gateways FILE --snapshot FILE --mode MODE [--apply]
         a config repo: refresh the IP gate's static snapshot from a gateways.json that
@@ -155,7 +155,7 @@ class Report:
 ZULIP_REPO = "zulip/zulip-server"
 ZULIP_TAG = re.compile(r"^(\d+)\.(\d+)-(\d+)$")
 DOCKERFILE_RE = re.compile(r"^ARG ZULIP_IMAGE=ghcr\.io/zulip/zulip-server:(?P<tag>[\w.-]+)@(?P<digest>sha256:[0-9a-f]{64})$", re.M)
-SIDECAR_RE = re.compile(r"^\s+(?P<key>\w+): '(?P<image>docker\.io/(?P<repo>[\w./-]+):(?P<tag>[\w.-]+))'$", re.M)
+SIDECAR_RE = re.compile(r'^\s+"(?P<key>\w+)": "(?P<image>docker\.io/(?P<repo>[\w./-]+):(?P<tag>[\w.-]+))",?$', re.M)
 BICEP_RE = re.compile(r"^ARG BICEP_VERSION=(v[\d.]+)$", re.M)
 
 
@@ -186,8 +186,8 @@ def check_zulip(root: Path, rep: Report) -> None:
     else:
         rep.lines.append(f"- Zulip `{cur_tag}` is current")
 
-    bicep = root / "infra" / "server.bicep"
-    for sm in SIDECAR_RE.finditer(bicep.read_text()):
+    sidecars = root / "image" / "sidecars.json"
+    for sm in SIDECAR_RE.finditer(sidecars.read_text()):
         repo, tag = sm.group("repo"), sm.group("tag")
         repo_name = repo.removeprefix("library/")
         num = re.match(r"^(\d+(?:\.\d+)*)(.*)$", tag)
@@ -201,7 +201,7 @@ def check_zulip(root: Path, rep: Report) -> None:
         same_major = [t for t in candidates if vkey(t)[0] == vkey(version)[0]]
         best = max(same_major, key=vkey) if same_major else tag
         if vkey(best) > vkey(tag):
-            rep.edit(bicep, sm.group("image"), sm.group("image").replace(f":{tag}", f":{best}"))
+            rep.edit(sidecars, sm.group("image"), sm.group("image").replace(f":{tag}", f":{best}"))
             rep.title_parts.append(f"{repo_name} {tag} → {best}")
             rep.lines.append(f"- sidecar **{repo_name}** `{tag}` → `{best}`")
         newest = max(candidates, key=vkey)
@@ -235,17 +235,18 @@ def check_template(config: Path, rep: Report, template_repo: str = "pu-shd/chat"
     if status != 200:
         raise UpdateError(f"{template_repo} {tag}: template.lock asset HTTP {status}")
     new = json.loads(body)
-    if (new.get("ref") != tag or "@sha256:" not in (new.get("image") or "")
-            or not re.fullmatch(r"[0-9a-f]{40}", new.get("sha") or "")):
+    if new.get("ref") != tag or not re.fullmatch(r"[0-9a-f]{40}", new.get("sha") or ""):
         raise UpdateError(f"{template_repo} {tag}: malformed template.lock asset {new}")
     # The tag must still point at the commit the release was built from.
     status, _, body = http(f"https://api.github.com/repos/{template_repo}/commits/{tag}", github_headers())
     if status != 200 or json.loads(body).get("sha") != new["sha"]:
         raise UpdateError(f"{template_repo} {tag}: tag does not point at the released commit {new['sha']}")
-    if lock.get("ref") == tag and lock.get("sha") == new["sha"] and lock.get("image") == new["image"]:
+    if lock.get("ref") == tag and lock.get("sha") == new["sha"]:
         rep.lines.append(f"- pu-shd/chat `{tag}` is current")
         return
-    merged = {**lock, **{k: new[k] for k in ("repo", "ref", "sha", "image")}}
+    # Images are built per department from the commit; a lock no longer carries one.
+    merged = {k: v for k, v in lock.items() if k != "image"}
+    merged.update({k: new[k] for k in ("repo", "ref", "sha")})
     rep.edits[lock_path] = json.dumps(merged, indent=2) + "\n"
     for wf in sorted((config / ".github" / "workflows").glob("*.yml")):
         text = rep.edits.get(wf, wf.read_text())
@@ -255,8 +256,8 @@ def check_template(config: Path, rep: Report, template_repo: str = "pu-shd/chat"
             rep.edits[wf] = updated
     rep.title_parts.append(f"pu-shd/chat {lock.get('ref')} → {tag}")
     rep.lines.append(f"- **pu-shd/chat {lock.get('ref')} → {tag}**: {rel.get('html_url', '')}")
-    rep.notes.append("generated/ is re-rendered with the new template in this PR; merging redeploys every server "
-                     "(an image change stops each server briefly while Zulip migrates)")
+    rep.notes.append("generated/ is re-rendered with the new template in this PR; merging builds the new image "
+                     "into the department registry and redeploys every server (each stops briefly while Zulip migrates)")
 
 
 # ------------------------------------------------------------------ pugwips (config repo)

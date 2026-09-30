@@ -1,6 +1,6 @@
 # Dependabot covers what it can parse; tools/updates.py (update-check.yml) covers the rest:
 # the Zulip image in image/Dockerfile (ARG + digest), the sidecar images in
-# infra/server.bicep, and the bicep CLI.
+# image/sidecars.json, and the bicep CLI.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -8,8 +8,8 @@ updates:
     schedule: {interval: weekly}
     groups: {actions: {patterns: ["*"]}}
     ignore:
-      # cosign-installer v4 installs cosign 3 (new bundle format). Image signing here and
-      # pugwips' gateways.json signatures are verified with cosign 2; move deliberately.
+      # cosign-installer v4 installs cosign 3 (new bundle format); pugwips' gateways.json
+      # signatures are verified with cosign 2. Move deliberately.
       - dependency-name: sigstore/cosign-installer
         update-types: ["version-update:semver-major"]
   - package-ecosystem: pip

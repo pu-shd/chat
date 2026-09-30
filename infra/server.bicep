@@ -38,8 +38,10 @@ param envStorageName string
 param dataQuotaGiB int = 100
 param zulipCpu string
 param zulipMemory string
-@description('Zulip image, pinned by digest')
+@description('Zulip image in the department registry, pinned by digest')
 param image string
+@description('Department Azure Container Registry login server; pulled with the managed identities')
+param registryServer string
 @description('docker-zulip environment: [{name, value}]')
 param zulipEnv array
 @description('ACA secret name -> Key Vault secret name')
@@ -51,13 +53,8 @@ param easyAuthExcludedPaths array = []
 param oidcClientId string
 param deployApp bool = true
 
-param sidecarImages object = {
-  redis: 'docker.io/library/redis:7.4-alpine'
-  memcached: 'docker.io/library/memcached:1.6-alpine'
-  rabbitmq: 'docker.io/library/rabbitmq:4.2-alpine'
-  postgres: 'docker.io/library/postgres:17-alpine'
-  curl: 'docker.io/curlimages/curl:8.16.0'
-}
+@description('Sidecar images in the department registry (render.py resolve maps image/sidecars.json onto it)')
+param sidecarImages object
 param tags object = {}
 
 var sidecarCpu = json('0.25')
@@ -175,6 +172,7 @@ resource app 'Microsoft.App/containerApps@2025-01-01' = if (deployApp) {
     workloadProfileName: 'Consumption'
     configuration: {
       activeRevisionsMode: 'Single'
+      registries: [ { server: registryServer, identity: identity.id } ]
       secrets: appSecrets
       ingress: {
         external: true
@@ -301,6 +299,7 @@ resource mgmt 'Microsoft.App/jobs@2025-01-01' = {
       replicaTimeout: 1800
       replicaRetryLimit: 0
       manualTriggerConfig: { parallelism: 1, replicaCompletionCount: 1 }
+      registries: [ { server: registryServer, identity: identity.id } ]
       secrets: appSecrets
     }
     template: {
@@ -336,6 +335,7 @@ resource dbinit 'Microsoft.App/jobs@2025-01-01' = {
       replicaTimeout: 600
       replicaRetryLimit: 0
       manualTriggerConfig: { parallelism: 1, replicaCompletionCount: 1 }
+      registries: [ { server: registryServer, identity: dbIdentity.id } ]
       secrets: dbinitSecrets
     }
     template: {
@@ -390,6 +390,7 @@ resource hc 'Microsoft.App/jobs@2025-01-01' = if (healthchecksEnabled && deployA
       replicaTimeout: 120
       replicaRetryLimit: 0
       scheduleTriggerConfig: { cronExpression: healthchecksCron, parallelism: 1, replicaCompletionCount: 1 }
+      registries: [ { server: registryServer, identity: identity.id } ]
       secrets: [
         { name: 'hc-ping-key', keyVaultUrl: '${vaultUri}healthchecks-ping-key', identity: identity.id }
       ]

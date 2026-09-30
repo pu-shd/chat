@@ -14,7 +14,7 @@ rm -rf "$state"; mkdir -p "$state/secrets"
 cp -R "$here/fixture/e2e" "$state/e2e"
 "$py" "$root/tools/render.py" render "$state/e2e" 2>/dev/null
 "$py" "$root/tools/render.py" resolve --server "$state/e2e/generated/servers/dept.json" \
-  --default-domain e2e.invalid --image pu-shd-chat:e2e --allow-unpinned-image > "$state/dept.params.json"
+  --default-domain e2e.invalid --image pu-shd-chat:e2e --registry e2echatacr.azurecr.io --allow-unpinned-image > "$state/dept.params.json"
 
 for s in secret_key postgres_password redis_password rabbitmq_password memcached_password social_auth_oidc_secret email_password; do
   openssl rand -hex 24 | tr -d '\n' > "$state/secrets/zulip__$s"

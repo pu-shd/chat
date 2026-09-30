@@ -133,3 +133,20 @@ def test_platform_email_resources_are_conditional():
     assert tpl["variables"]["useAcs"] == "[not(empty(parameters('acs')))]"
     comm = resource(tpl, "Microsoft.Communication/communicationServices")[0]
     assert "acsLinkedDomains" in json.dumps(comm["properties"]["linkedDomains"])
+
+
+def test_images_come_from_the_department_registry(server):
+    app = resource(server, "Microsoft.App/containerApps")[0]
+    assert app["properties"]["configuration"]["registries"] == [
+        {"server": "[parameters('registryServer')]", "identity": "[resource('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('appIdentityName')).id]"}
+    ] or "registryServer" in json.dumps(app["properties"]["configuration"]["registries"])
+    for job in resource(server, "Microsoft.App/jobs"):
+        assert "registryServer" in json.dumps(job["properties"]["configuration"]["registries"]), job["name"]
+    assert "defaultValue" not in server["parameters"]["sidecarImages"]  # always the registry copies
+
+
+def test_platform_has_a_private_registry():
+    tpl = build("platform.bicep")
+    (acr,) = resource(tpl, "Microsoft.ContainerRegistry/registries")
+    assert acr["sku"]["name"] == "Basic" and acr["properties"]["adminUserEnabled"] is False
+    assert "registryLoginServer" in tpl["outputs"]

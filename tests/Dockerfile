@@ -3,9 +3,10 @@
 FROM python:3.14-slim
 
 # zsh/jq/openssl: the operations scripts. bash: the image entrypoint scripts.
-# postgresql-client: chat-dbinit integration tests. dnsutils/curl exist but are shimmed.
+# postgresql-client: chat-dbinit integration tests. git: build-image.zsh checks its
+# checkout. dnsutils/curl exist but are shimmed.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends zsh jq curl openssl bash dnsutils \
+ && apt-get install -y --no-install-recommends zsh jq curl openssl bash dnsutils git \
       postgresql-client ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 

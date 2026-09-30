@@ -12,7 +12,6 @@ on:
       server: {type: string, required: true}
       environment: {type: string, required: true}
       template_ref: {type: string, required: true, description: "tag of pu-shd/chat, from template.lock"}
-      image: {type: string, required: true, description: "image@sha256 from template.lock"}
       azure_client_id: {type: string, required: true}
       azure_tenant_id: {type: string, required: true}
       azure_subscription_id: {type: string, required: true}
@@ -36,10 +35,8 @@ jobs:
       CHAT_PY: ${{ github.workspace }}/.chat-template/.venv/bin/python
       PUGWIPS_READ_TOKEN: ${{ secrets.PUGWIPS_READ_TOKEN }}
       HEALTHCHECKS_API_KEY: ${{ secrets.HEALTHCHECKS_API_KEY }}
-      CHAT_REQUIRE_IMAGE_SIGNATURE: "1"
       CFG: ${{ inputs.config_dir }}
       SRV: ${{ inputs.server }}
-      IMAGE: ${{ inputs.image }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/checkout@v7
@@ -64,9 +61,9 @@ jobs:
         run: |
           [[ "$CFG" =~ ^[a-z][a-z0-9]{1,11}$ ]] || { echo "bad config_dir"; exit 2; }
           [[ "$SRV" =~ ^[a-z][a-z0-9-]{0,14}[a-z0-9]$ ]] || { echo "bad server"; exit 2; }
-          [[ "$IMAGE" =~ ^ghcr\.io/pu-shd/chat:v[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}$ ]] || { echo "image must be ghcr.io/pu-shd/chat:vX.Y.Z@sha256:..."; exit 2; }
       - name: Deploy
-        run: zsh .chat-template/scripts/deploy-server.zsh --config "$CFG" --server "$SRV" --image "$IMAGE" --yes
+        # The image: chat:<ref>-<sha7> in the department registry (build-image.yml ran first).
+        run: zsh .chat-template/scripts/deploy-server.zsh --config "$CFG" --server "$SRV" --lock template.lock --yes
       - name: Smoke test
         run: zsh .chat-template/scripts/smoke.zsh --config "$CFG" --server "$SRV" --runner-ip auto
       - name: Remove temporary IP rule

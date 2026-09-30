@@ -1,0 +1,8 @@
+{
+  "_note": "Upstream images each department's build-image.zsh imports into its own Azure Container Registry (as <registry>/<path>), so nothing is pulled from Docker Hub at run time. Bumped by tools/updates.py (same major only).",
+  "redis": "docker.io/library/redis:7.4-alpine",
+  "memcached": "docker.io/library/memcached:1.6-alpine",
+  "rabbitmq": "docker.io/library/rabbitmq:4.2-alpine",
+  "postgres": "docker.io/library/postgres:17-alpine",
+  "curl": "docker.io/curlimages/curl:8.16.0"
+}

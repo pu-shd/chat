@@ -7,17 +7,18 @@ It follows the same pattern as `page-stream` / `page-stream-config`.
 
 ```
 pu-orfe/chat-config (private)                pu-shd/chat (public, this repo)
-├── template.lock  ── pins ref + image@sha ──▶ ghcr.io/pu-shd/chat:vX.Y.Z
+├── template.lock  ── pins ref + commit sha ─▶ release vX.Y.Z (commit)
 ├── orfe/chat.yml  ── tools/render.py ──────▶ orfe/generated/*.json   (committed, CI-checked)
-└── .github/workflows/deploy.yml ── uses ───▶ .github/workflows/deploy-server.yml@vX.Y.Z
-                                                 └─ scripts/deploy-server.zsh → infra/server.bicep
+└── .github/workflows/deploy.yml ── uses ───▶ build-image.yml@sha   → az acr build into the
+                                                                       department's registry
+                                              deploy-server.yml@sha → infra/server.bicep
 ```
 
 ## What gets deployed
 
 | Layer | Per | Resources (`infra/`) |
 |---|---|---|
-| platform | department | resource group, VNet, Container Apps environment (workload profiles), PostgreSQL 17 Flexible Server (private), Premium NFS storage, Key Vault (RBAC), Log Analytics, a managed identity that reads Key Vault |
+| platform | department | resource group, VNet, Container Apps environment (workload profiles), PostgreSQL 17 Flexible Server (private), Premium NFS storage, Key Vault (RBAC), **Azure Container Registry** (Basic) for the department's images, Log Analytics |
 | server | Zulip server | Container App with **exactly one replica**: `zulip` plus `redis`, `memcached` and `rabbitmq` sidecars. Also an NFS `/data` share, and two jobs: `<app>-dbinit` (database and role) and `<app>-mgmt` (realms, mail test, push registration) |
 | realm | Zulip organization | a row in a server's database, created by the `-mgmt` job |
 
@@ -91,7 +92,8 @@ git clone https://github.com/pu-shd/chat.git .chat-template && git -C .chat-temp
 | Step | Script | What it does |
 |---|---|---|
 | `prereqs` | | tools, venv, Azure login, `render --check` |
-| `platform` | `deploy-platform.zsh` | resource group, Key Vault, network, environment, PostgreSQL, storage |
+| `platform` | `deploy-platform.zsh` | resource group, Key Vault, network, environment, PostgreSQL, storage, container registry |
+| `image` | `build-image.zsh` | builds `chat:<ref>-<sha7>` in the registry with ACR Tasks from template.lock's commit (this checkout must be exactly that commit), locks the tag, and imports the sidecar images |
 | `github` | `setup-github-oidc.zsh` | CI app registration with federated credentials for the Environments `orfe` and `orfe-admin`; Contributor on the resource group; Key Vault Secrets Officer. With `--set-gh-vars`, it also runs `setup-github-repo.zsh` (see Security model) and sets the `AZURE_*` repository variables |
 | `secrets` | | asks for the Resend key (goes to Key Vault) and, optionally, `PUGWIPS_READ_TOKEN` (becomes a GitHub secret). With Healthchecks enabled, also the ping key (Key Vault and GitHub `HEALTHCHECKS_PING_KEY`) and, optionally, the API key |
 | `entra` | `entra-app.zsh` | per server: Zulip's sign-in app registration and redirect URIs; the client secret goes straight into Key Vault |
@@ -101,8 +103,12 @@ git clone https://github.com/pu-shd/chat.git .chat-template && git -C .chat-temp
 | `smoke` | `smoke.zsh` | realm answers, Entra redirect, `/<slug>` redirects |
 | `dns` | `bind-domain.zsh --print` | writes `dns-request-<dept>.md`, the ticket for OIT |
 
-Before the first bootstrap, cut a template release (`git tag v0.1.0 && git push --tags`).
-Then make the `ghcr.io/pu-shd/chat` package public. Copy the release's `template.lock` asset (ref, commit sha and `image@sha256`) into the config repo, and pin its `uses:` lines to that sha.
+Before the first bootstrap, cut a template release (`git tag vX.Y.Z && git push --tags`). Copy the release's `template.lock` asset (ref and commit sha) into the config repo, and pin its `uses:` lines to that sha. The weekly Update check does this for later releases.
+
+**Images.** Nothing is published to a public registry. Each department's deploy builds the image into its own Azure Container Registry from the pinned commit (`build-image.zsh`, `az acr build`), the same pattern as graddb and meet.
+- The tag `chat:<ref>-<sha7>` is built once and then locked against overwrite and deletion.
+- Servers pull it by digest with their managed identities (AcrPull). There are no registry passwords or tokens.
+- The sidecar images (redis, memcached, rabbitmq, postgres, curl; see `image/sidecars.json`) are imported into the same registry, so no server depends on Docker Hub, or its rate limits, at run time.
 
 ## Running and testing before DNS exists
 
@@ -169,7 +175,7 @@ Realms are deactivated, never deleted: `realm.zsh --deactivate <slug>`, with typ
   - `setup-github-repo.zsh` protects `main` and configures both environments. The typed confirmation phrases are a second safeguard, not the only one.
 - **What code runs.**
   - Config repos pin every `uses: pu-shd/chat/...` to a **commit SHA**, with the tag as a comment; release tags in pu-shd/chat are immutable (a ruleset).
-  - Images are **keyless-signed** by the release workflow. Deploys verify the signature against that workflow, which is mandatory in CI.
+  - Images are **built inside each department's own registry** from that commit. `build-image.zsh` refuses a template checkout that isn't exactly the locked commit, or that has local changes under `image/`. The built tag is locked against overwrite and deletion. Deploys use its digest and refuse images from any other registry. Zulip's own base image is pinned by digest.
   - Third-party actions are pinned to commit SHAs.
   - The config repo's update check runs new template code only with a read-only token. A separate job, which runs none of it, opens the PR.
 - **Least privilege in Azure.** Each server has its own identities, granted per secret by `grant-access.zsh`:
@@ -295,9 +301,9 @@ healthchecks:
   - A config repo's template PR fails clearly without it, because it changes the pinned `uses:` lines.
 - **The upgrade path:**
   1. Merge the template PR.
-  2. Tag a release. It publishes the image and a `template.lock` asset.
+  2. Tag a release. It checks that the image builds and publishes a `template.lock` asset.
   3. Each department's Update check opens its PR.
-  4. Merging that redeploys, with the maintenance stop described under Day 2.
+  4. Merging that builds the new image into the department registry and redeploys, with the maintenance stop described under Day 2.
 
 ## Teardown
 
@@ -319,7 +325,7 @@ The single-server scripts (`teardown-server.zsh`, `teardown-platform.zsh`) remai
 
 | Task | Command (or the config repo's **Operate** workflow) |
 |---|---|
-| Upgrade Zulip | Bump `ZULIP_IMAGE` in `image/Dockerfile`, tag a release, update `template.lock` plus the `@ref` in the config repo's workflows. The deploy stops the old revision, so only one Zulip migrates, and records a PostgreSQL restore point |
+| Upgrade Zulip | Merge the template's update PR (it bumps `ZULIP_IMAGE`), tag a release, merge the config repo's update PR. Its deploy builds the new image into the registry, stops the old revision so only one Zulip migrates, and records a PostgreSQL restore point |
 | Refresh IP gate | Daily `ip-gate.yml`, or `ip-gate.zsh --apply` |
 | Check mail | `realm.zsh --send-test-email you@princeton.edu` |
 | Mobile push | Apply for Zulip's free Community plan for each organization, then `realm.zsh --register-push` and set `push_notifications: true` |
@@ -347,3 +353,4 @@ These depend on Azure behaviour that the local tests cannot reproduce. Check the
 - The `-hc` job reaching `http://<app>:8080/health` through the internal-only TCP port mapping (plain HTTP, no redirect).
 - `az containerapp job start --env-vars` merging with (not replacing) the job's environment. The purge teardown relies on it and checks the job's own `dropped` report.
 - Healthchecks' `GET /api/v3/checks/?slug=` filter, which `--sync` uses to find existing checks.
+- `az acr build` / `az acr import` into the Basic registry from CI (Contributor on the resource group), and Container Apps pulling with the user-assigned identities' AcrPull.

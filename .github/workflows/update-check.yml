@@ -50,7 +50,7 @@ jobs:
           labels: dependencies
           add-paths: |
             image/Dockerfile
-            infra/server.bicep
+            image/sidecars.json
             tests/Dockerfile
             tools/zulip_reserved.py
       - name: Healthchecks (optional)

@@ -9,6 +9,8 @@
 param location string
 param environmentName string
 param storageAccountName string
+@description('Azure Container Registry (Basic) the department builds and imports its images into')
+param registryName string
 param postgresName string
 param logAnalyticsName string
 param identityName string
@@ -138,6 +140,20 @@ resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   }
 }
 
+// Images are built here from the pinned pu-shd/chat commit (build-image.zsh) and pulled
+// by each server's managed identity (AcrPull, granted by grant-access.zsh). No admin
+// user; anonymous pull is off (the default).
+resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
+  name: registryName
+  location: location
+  tags: tags
+  sku: { name: 'Basic' }
+  properties: {
+    adminUserEnabled: false
+    publicNetworkAccess: 'Enabled'
+  }
+}
+
 resource environment 'Microsoft.App/managedEnvironments@2025-01-01' = {
   name: environmentName
   location: location
@@ -204,6 +220,7 @@ resource communication 'Microsoft.Communication/communicationServices@2023-04-01
 }
 
 output environmentId string = environment.id
+output registryLoginServer string = registry.properties.loginServer
 output defaultDomain string = environment.properties.defaultDomain
 output staticIp string = environment.properties.staticIp
 output customDomainVerificationId string = environment.properties.customDomainConfiguration.customDomainVerificationId
