@@ -19,7 +19,7 @@ pu-orfe/chat-config (private)                pu-shd/chat (public, this repo)
 | Layer | Per | Resources (`infra/`) |
 |---|---|---|
 | platform | department | resource group, VNet, Container Apps environment (workload profiles), PostgreSQL 17 Flexible Server (private), Premium NFS storage, Key Vault (RBAC), **Azure Container Registry** (Basic) for the department's images, Log Analytics |
-| server | Zulip server | Container App with **exactly one replica**: `zulip` plus `redis`, `memcached` and `rabbitmq` sidecars. Also an NFS `/data` share, and two jobs: `<app>-dbinit` (database and role) and `<app>-mgmt` (realms, mail test, push registration) |
+| server | Zulip server | Container App with **exactly one replica**: `zulip` plus `redis`, `memcached` and `rabbitmq` sidecars, all pulled from the department registry. Also an NFS `/data` share; the jobs `<app>-dbinit` (database and role), `<app>-mgmt` (realms, mail test, push registration) and, with Healthchecks, `<app>-hc`; and two managed identities, `<app>-id` and `<app>-db-id` (see Security model) |
 | realm | Zulip organization | a row in a server's database, created by the `-mgmt` job |
 
 **Sign-in** is Zulip's own **Microsoft Entra ID OIDC** login, restricted to the tenant. It works for the web, desktop and mobile apps.
@@ -38,7 +38,9 @@ pu-orfe/chat-config (private)                pu-shd/chat (public, this repo)
 - **Azure Communication Services** (`provider: acs`). See Email with Azure Communication Services.
 - Any other relay (`provider: smtp`, with `host`, `port` and `user`).
 
-**IP gate (optional, per server).** An allowlist of Princeton campus and GlobalProtect VPN ranges, taken from [pugwips](https://github.com/PrincetonUniversity/pugwips).
+**Request limits** in Zulip's nginx cap each client IP on the sign-in, sign-up and API paths (on by default; see Per-client-IP request limits).
+
+**IP gate (optional, per server; can be switched off for a whole department).** An allowlist of Princeton campus and GlobalProtect VPN ranges, taken from [pugwips](https://github.com/PrincetonUniversity/pugwips).
 - **Where the VPN ranges come from, in order:**
   1. Live signed release, when `PUGWIPS_READ_TOKEN` exists.
   2. A **static link**: `ip_gate.fallback_url`, or the dated snapshot committed next to `chat.yml`.
@@ -55,6 +57,7 @@ github: {repo: pu-orfe/chat-config, environment: orfe}
 admin_email: chat-admin@orfe.princeton.edu
 email: {provider: resend, from: noreply@orfe.princeton.edu}
 defaults: {dns: pending, cpu: 2.0}
+ip_gate: {enabled: false}               # or leave it on and gate individual servers
 servers:
   dept:                                  # chat.orfe.princeton.edu (+ the /<slug> redirects)
     kind: dedicated
@@ -78,7 +81,12 @@ servers:
 
 ## First deployment (bootstrap)
 
-You need Owner on the subscription, the right to create Entra app registrations, `az`, `jq`, `zsh`, `python3`, and the Resend API key.
+You need:
+- Owner on the subscription, and the right to create Entra app registrations;
+- `az`, `jq`, `zsh`, `git` and `python3`;
+- the Resend API key, or, with `provider: acs`, nothing: `acs-email.zsh` creates the SMTP credentials.
+
+The image is built in Azure (ACR Tasks), so the operator needs no Docker.
 
 ```zsh
 git clone git@github.com:pu-orfe/chat-config.git && cd chat-config
@@ -95,9 +103,9 @@ git clone https://github.com/pu-shd/chat.git .chat-template && git -C .chat-temp
 | `platform` | `deploy-platform.zsh` | resource group, Key Vault, network, environment, PostgreSQL, storage, container registry |
 | `image` | `build-image.zsh` | builds `chat:<ref>-<sha7>` in the registry with ACR Tasks from template.lock's commit (this checkout must be exactly that commit), locks the tag, and imports the sidecar images |
 | `github` | `setup-github-oidc.zsh` | CI app registration with federated credentials for the Environments `orfe` and `orfe-admin`; Contributor on the resource group; Key Vault Secrets Officer. With `--set-gh-vars`, it also runs `setup-github-repo.zsh` (see Security model) and sets the `AZURE_*` repository variables |
-| `secrets` | | asks for the Resend key (goes to Key Vault) and, optionally, `PUGWIPS_READ_TOKEN` (becomes a GitHub secret). With Healthchecks enabled, also the ping key (Key Vault and GitHub `HEALTHCHECKS_PING_KEY`) and, optionally, the API key |
+| `secrets` | | asks for the Resend key, which goes to Key Vault (with `provider: acs`, runs `acs-email.zsh` instead). Optionally `PUGWIPS_READ_TOKEN` (becomes a GitHub secret) when a server is gated. With Healthchecks enabled, also the ping key (Key Vault and GitHub `HEALTHCHECKS_PING_KEY`) and, optionally, the API key |
 | `entra` | `entra-app.zsh` | per server: Zulip's sign-in app registration and redirect URIs; the client secret goes straight into Key Vault |
-| `access` | `grant-access.zsh` | per server: its two managed identities, each granted read on only its own Key Vault secrets |
+| `access` | `grant-access.zsh` | per server: its two managed identities, each granted read on only its own Key Vault secrets, plus AcrPull on the registry |
 | `servers` | `deploy-server.zsh` | per server; the redirect host goes last |
 | `healthchecks` | `healthchecks.zsh --sync` | when enabled and an API key exists: creates the checks with their schedules |
 | `smoke` | `smoke.zsh` | realm answers, Entra redirect, `/<slug>` redirects |
@@ -182,6 +190,7 @@ Realms are deactivated, never deleted: `realm.zsh --deactivate <slug>`, with typ
   - `<app>-id`: the Zulip app, the `-mgmt` and `-hc` jobs; only its own secrets.
   - `<app>-db-id`: `-dbinit` only; its database password plus the PostgreSQL admin password.
   - Nothing has vault-wide read, so a compromised server cannot read another server's secrets or the admin password.
+  - Both identities have AcrPull on the department registry, and nothing else there. CI builds with its Contributor role on the resource group.
   - Key Vault has purge protection: deleted secrets stay recoverable for 90 days.
 - **Secrets never on command lines or in logs.** Key Vault values go through 0600 files. The Healthchecks key reaches curl as config on stdin. psql and Redis read passwords from files. The CI stand-in tests assert this.
 - **Inputs are data.**
@@ -289,8 +298,8 @@ healthchecks:
 
 | Repo | Workflow | Schedule | What it does |
 |---|---|---|---|
-| config | **Keepalive** | daily | `keepalive.zsh` for every server. Smoke test; TLS certificates (fail under 14 days); the Entra client secret, whose expiry `entra-app.zsh` records on its Key Vault secret (fail under 21 days); pugwips snapshot age; then pings `-web`. Also re-enables the repo's scheduled workflows, so GitHub's 60-day inactivity rule never switches them off |
-| config | **Update check** | weekly | Up to two PRs. `auto/template`: a newer pu-shd/chat release, with `template.lock` and every `uses: …@ref` bumped, `generated/` re-rendered by the new template, and config tests run. `auto/pugwips`: the IP gate's static snapshot refreshed from the signed pugwips release (needs `PUGWIPS_READ_TOKEN`) |
+| config | **Keepalive** | daily | `keepalive.zsh` for every server: smoke test; TLS certificates (fail under 14 days); the Entra client secret, whose expiry `entra-app.zsh` records on its Key Vault secret (fail under 21 days); with ACS, the SMTP secret too; the pugwips snapshot age on gated servers; then pings `-web`. Also re-enables the repo's scheduled workflows, so GitHub's 60-day inactivity rule never switches them off |
+| config | **Update check** | weekly | Up to two PRs. `auto/template`: a newer pu-shd/chat release. `template.lock` and every `uses:` are pinned to its commit (refusing a moved tag), `generated/` is re-rendered by the new template, and the config tests run. `auto/pugwips` (only with the gate on and `PUGWIPS_READ_TOKEN`): the static snapshot refreshed from the signed pugwips release |
 | template | **Update check** | weekly | `tools/updates.py zulip`: the Zulip image (new release or upstream rebuild, tag plus digest); sidecar images (newest in the *same* major; new majors are only reported); the bicep CLI; regenerates the reserved-name list for a new Zulip version. Runs the test suite, then opens `auto/updates` |
 | template | **Keepalive** | weekly | re-enables its scheduled workflows |
 | template | Dependabot | weekly | GitHub Actions, pip, the test image's base |
@@ -326,10 +335,12 @@ The single-server scripts (`teardown-server.zsh`, `teardown-platform.zsh`) remai
 | Task | Command (or the config repo's **Operate** workflow) |
 |---|---|
 | Upgrade Zulip | Merge the template's update PR (it bumps `ZULIP_IMAGE`), tag a release, merge the config repo's update PR. Its deploy builds the new image into the registry, stops the old revision so only one Zulip migrates, and records a PostgreSQL restore point |
-| Refresh IP gate | Daily `ip-gate.yml`, or `ip-gate.zsh --apply` |
+| Refresh IP gate (gated servers) | Daily `ip-gate.yml`, or `ip-gate.zsh --apply` |
 | Check mail | `realm.zsh --send-test-email you@princeton.edu` |
 | Mobile push | Apply for Zulip's free Community plan for each organization, then `realm.zsh --register-push` and set `push_notifications: true` |
 | Rotate the Entra secret | `entra-app.zsh --rotate-secret`, then `update-server.zsh --restart`, then `entra-app.zsh --prune-old-secrets`; until then the old secret still works |
+| Rotate the ACS SMTP secret | `acs-email.zsh --rotate-secret`, restart the servers, then `acs-email.zsh --prune-old-secrets` |
+| Rebuild the image | `build-image.zsh --config <dept>`: a no-op when `chat:<ref>-<sha7>` already exists; a new release gets a new tag |
 | Health right now | `keepalive.zsh --config <dept>`; with Healthchecks, `healthchecks.zsh --list` |
 | Remove servers or everything | `teardown.zsh`, or the Teardown workflow (see Teardown above) |
 
@@ -337,10 +348,10 @@ The single-server scripts (`teardown-server.zsh`, `teardown-platform.zsh`) remai
 
 | Command | What runs |
 |---|---|
-| `docker-compose -f tests/docker-compose.yml run --rm tests` | Unit and integration tests. The renderer, every zsh script against recording `az`/`gh`/`dig`/`curl`/`cosign` stand-ins that fail on any unexpected call, the Bicep templates, the image entrypoint, and `chat-dbinit` against a real PostgreSQL 17 whose admin, like Azure's, is not a superuser |
-| `tests/e2e/run.zsh` | Builds the image and boots Zulip with settings rendered from a real `chat.yml`, using the same sidecar commands as Bicep plus a mock Entra, a mail sink and a mock Healthchecks. It then checks health and proxy trust, the redirects, realm creation through the mgmt job, a complete OIDC sign-in, outgoing mail, and the `-hc` probe's success and failure pings |
+| `docker-compose -f tests/docker-compose.yml run --rm tests` | Unit and integration tests. The renderer, the update checker and every zsh script (against recording `az`/`gh`/`dig`/`curl`/`cosign` stand-ins that fail on any unexpected call), the Bicep templates, the image entrypoint (redirects, request limits), and `chat-dbinit` against a real PostgreSQL 17 whose admin, like Azure's, is not a superuser |
+| `tests/e2e/run.zsh` | Builds the image and boots Zulip with settings rendered from a real `chat.yml`, using the same sidecar commands as Bicep plus a mock Entra, a mail sink and a mock Healthchecks. It then checks health and proxy trust, the redirects, realm creation through the mgmt job, a complete OIDC sign-in, outgoing mail, the per-IP request limits (429 per client, exempt ranges untouched), and the `-hc` probe's success and failure pings |
 
-CI (`.github/workflows/ci.yml`) runs both, plus actionlint.
+CI (`.github/workflows/ci.yml`) runs both, plus actionlint. The Release workflow (`workflow_dispatch` for a dry run) checks that the image builds.
 
 ## Not yet verified on Azure
 
