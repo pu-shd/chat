@@ -1,0 +1,16 @@
+# Dependabot covers what it can parse; tools/updates.py (update-check.yml) covers the rest:
+# the Zulip image in image/Dockerfile (ARG + digest), the sidecar images in
+# infra/server.bicep, and the bicep CLI.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: {interval: weekly}
+    groups: {actions: {patterns: ["*"]}}
+  - package-ecosystem: pip
+    directories: [/tools, /tests]
+    schedule: {interval: weekly}
+    groups: {python: {patterns: ["*"]}}
+  - package-ecosystem: docker
+    directory: /tests
+    schedule: {interval: weekly}

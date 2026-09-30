@@ -1,0 +1,61 @@
+name: Release image
+
+# Tag vX.Y.Z → ghcr.io/pu-shd/chat:vX.Y.Z (linux/amd64 for Container Apps, arm64 for
+# Macs), and a GitHub release whose notes carry the digest to pin in each config repo's
+# template.lock. The GHCR package must be public so any department can pull it.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write   # keyless cosign signature for the image
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: image
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.10.1
+      - name: Sign the image (keyless; deploys verify it)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "ghcr.io/${GITHUB_REPOSITORY}@${DIGEST}"
+      - name: Release notes with the pin
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          [ -n "$DIGEST" ] || { echo "no digest from the build"; exit 1; }
+          image="ghcr.io/${GITHUB_REPOSITORY}:${TAG}@${DIGEST}"
+          cat > notes.md <<EOT
+          Image: \`${image}\`
+
+          Pin it in a config repo's \`template.lock\`:
+
+          \`\`\`json
+          {"repo": "${GITHUB_REPOSITORY}", "ref": "${TAG}", "sha": "${GITHUB_SHA}", "image": "${image}"}
+          \`\`\`
+          EOT
+          # Config repos' update check reads this asset to bump their template.lock.
+          jq -n --arg repo "$GITHUB_REPOSITORY" --arg ref "$TAG" --arg sha "$GITHUB_SHA" --arg image "$image" \
+            '{repo: $repo, ref: $ref, sha: $sha, image: $image}' > template.lock
+          gh release create "$TAG" --title "$TAG" --notes-file notes.md --verify-tag template.lock

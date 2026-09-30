@@ -1,0 +1,25 @@
+# E2E fixture: rendered and resolved exactly like a real department; run.zsh then
+# points the few host names at the compose services.
+department: e2e
+azure:
+  tenant_id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+  subscription_id: bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb
+  region: canadacentral
+  prefix: e2e-chat
+github: {repo: pu-shd/chat, environment: e2e}
+admin_email: admin@e2e.test
+email: {provider: resend, from: noreply@e2e.test, from_name: E2E Chat}
+defaults: {dns: live}
+servers:
+  dept:
+    kind: dedicated
+    host: chat.e2e.test
+    realm: {name: E2E Department, owner: {email: owner@e2e.test, name: E2E Owner}}
+    entra: {client_id: 11111111-2222-3333-4444-555555555555}
+  groups:
+    kind: shared
+    external_host: groups.chat.e2e.test
+    realm_domain: chat.e2e.test
+    realms:
+      - {slug: ahmadi-group, name: Ahmadi Group, owner: {email: pi@e2e.test, name: PI}}
+    entra: {client_id: 11111111-2222-3333-4444-666666666666}

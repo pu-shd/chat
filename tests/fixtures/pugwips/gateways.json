@@ -1,0 +1,8 @@
+{
+  "resolved_at": "2026-09-28T12:17:00Z",
+  "gateways": {
+    "us-northeast.gw.example": {"ips": ["198.51.100.17"], "cidrs": ["198.51.100.0/24"], "vendor_prefixes": ["198.51.0.0/17"]},
+    "us-southwest-g.gw.example": {"ips": ["203.0.113.128"], "cidrs": ["203.0.113.0/24"], "vendor_prefixes": ["203.0.112.0/20"]},
+    "kr.gw.example": {"ips": ["192.0.2.97"], "cidrs": ["192.0.2.0/24"], "vendor_prefixes": ["192.0.2.97/32"]}
+  }
+}

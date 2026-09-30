@@ -1,0 +1,77 @@
+name: Deploy one Zulip server (reusable)
+
+# Called by a department's config repo, e.g.
+#   uses: pu-shd/chat/.github/workflows/deploy-server.yml@v1.2.3
+# The caller's checkout holds chat.yml + generated/; this repo is checked out at the
+# same ref into .chat-template. Azure login is OIDC against the CALLER's GitHub
+# Environment (subject repo:<caller>:environment:<environment>).
+on:
+  workflow_call:
+    inputs:
+      config_dir: {type: string, required: true, description: "department directory in the caller, e.g. orfe"}
+      server: {type: string, required: true}
+      environment: {type: string, required: true}
+      template_ref: {type: string, required: true, description: "tag of pu-shd/chat, from template.lock"}
+      image: {type: string, required: true, description: "image@sha256 from template.lock"}
+      azure_client_id: {type: string, required: true}
+      azure_tenant_id: {type: string, required: true}
+      azure_subscription_id: {type: string, required: true}
+    secrets:
+      PUGWIPS_READ_TOKEN: {required: false}
+      HEALTHCHECKS_API_KEY: {required: false}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: chat-${{ inputs.environment }}-${{ inputs.server }}
+      cancel-in-progress: false
+    timeout-minutes: 60
+    env:
+      CHAT_PY: ${{ github.workspace }}/.chat-template/.venv/bin/python
+      PUGWIPS_READ_TOKEN: ${{ secrets.PUGWIPS_READ_TOKEN }}
+      HEALTHCHECKS_API_KEY: ${{ secrets.HEALTHCHECKS_API_KEY }}
+      CHAT_REQUIRE_IMAGE_SIGNATURE: "1"
+      CFG: ${{ inputs.config_dir }}
+      SRV: ${{ inputs.server }}
+      IMAGE: ${{ inputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: pu-shd/chat
+          ref: ${{ inputs.template_ref }}
+          path: .chat-template
+      - uses: actions/setup-python@v7
+        with: {python-version: "3.12"}
+      - name: Tools
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq zsh jq dnsutils
+          zsh .chat-template/scripts/setup-venv.zsh
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.10.1
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ inputs.azure_client_id }}
+          tenant-id: ${{ inputs.azure_tenant_id }}
+          subscription-id: ${{ inputs.azure_subscription_id }}
+      - name: Validate inputs
+        shell: bash
+        run: |
+          [[ "$CFG" =~ ^[a-z][a-z0-9]{1,11}$ ]] || { echo "bad config_dir"; exit 2; }
+          [[ "$SRV" =~ ^[a-z][a-z0-9-]{0,14}[a-z0-9]$ ]] || { echo "bad server"; exit 2; }
+          [[ "$IMAGE" =~ ^ghcr\.io/pu-shd/chat:v[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}$ ]] || { echo "image must be ghcr.io/pu-shd/chat:vX.Y.Z@sha256:..."; exit 2; }
+      - name: Deploy
+        run: zsh .chat-template/scripts/deploy-server.zsh --config "$CFG" --server "$SRV" --image "$IMAGE" --yes
+      - name: Smoke test
+        run: zsh .chat-template/scripts/smoke.zsh --config "$CFG" --server "$SRV" --runner-ip auto
+      - name: Remove temporary IP rule
+        if: always()
+        run: |
+          if [ "$(jq -r .ip_gate "$CFG/generated/servers/$SRV.json")" = true ]; then
+            zsh .chat-template/scripts/ip-gate.zsh --config "$CFG" --server "$SRV" --remove-temp
+          fi

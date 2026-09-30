@@ -1,0 +1,278 @@
+# pu-shd/chat
+
+Vend [Zulip](https://zulip.com) chat workspaces on Azure for Princeton departments and research groups.
+This public repo is the **template**: infrastructure, image, scripts, and reusable workflows.
+Each department keeps a small **private config repo** (for example `pu-orfe/chat-config`) that holds one `chat.yml` and deploys through GitOps.
+It follows the same pattern as `page-stream` / `page-stream-config`.
+
+```
+pu-orfe/chat-config (private)                pu-shd/chat (public, this repo)
+├── template.lock  ── pins ref + image@sha ──▶ ghcr.io/pu-shd/chat:vX.Y.Z
+├── orfe/chat.yml  ── tools/render.py ──────▶ orfe/generated/*.json   (committed, CI-checked)
+└── .github/workflows/deploy.yml ── uses ───▶ .github/workflows/deploy-server.yml@vX.Y.Z
+                                                 └─ scripts/deploy-server.zsh → infra/server.bicep
+```
+
+## What gets deployed
+
+| Layer | Per | Resources (`infra/`) |
+|---|---|---|
+| platform | department | resource group, VNet, Container Apps environment (workload profiles), PostgreSQL 17 Flexible Server (private), Premium NFS storage, Key Vault (RBAC), Log Analytics, a managed identity that reads Key Vault |
+| server | Zulip server | Container App with **exactly one replica**: `zulip` plus `redis`, `memcached` and `rabbitmq` sidecars. Also an NFS `/data` share, and two jobs: `<app>-dbinit` (database and role) and `<app>-mgmt` (realms, mail test, push registration) |
+| realm | Zulip organization | a row in a server's database, created by the `-mgmt` job |
+
+**Sign-in** is Zulip's own **Microsoft Entra ID OIDC** login, restricted to the tenant. It works for the web, desktop and mobile apps.
+- Each server has its own app registration. User assignment is required on it, so only assigned users or groups can sign in.
+- Entra **Easy Auth** is available as an optional perimeter (`easy_auth: true`). It is off by default because it can only guard the web UI: API, uploads, SCIM and mobile sign-in must be exempt from it.
+
+**URLs.** Zulip cannot be served from a URL path, only from the root of a hostname.
+- A research group therefore lives at `<slug>.chat.<dept>.princeton.edu`.
+- `chat.<dept>.princeton.edu/<slug>` is a 302 redirect to it, served by the department server's nginx.
+- The group's URL is the same whether it is:
+  - a **realm on the shared `groups` server** (cheap), or
+  - a **dedicated server** (isolated, for groups that need their own data and upgrade schedule).
+
+**Email** goes out through Resend SMTP (port 587; Azure blocks 25).
+
+**IP gate (optional, per server).** An allowlist of Princeton campus and GlobalProtect VPN ranges, taken from [pugwips](https://github.com/PrincetonUniversity/pugwips).
+- **Where the VPN ranges come from, in order:**
+  1. Live signed release, when `PUGWIPS_READ_TOKEN` exists.
+  2. A **static link**: `ip_gate.fallback_url`, or the dated snapshot committed next to `chat.yml`.
+  3. The rules already applied to the app.
+- The allowlist is never narrowed below the `prefix_mode` you asked for.
+- The gate blocks the mobile apps for anyone off campus and off VPN.
+
+## A department's `chat.yml`
+
+```yaml
+department: orfe
+azure: {tenant_id: …, subscription_id: …, region: canadacentral, prefix: orfe-chat}
+github: {repo: pu-orfe/chat-config, environment: orfe}
+admin_email: chat-admin@orfe.princeton.edu
+email: {provider: resend, from: noreply@orfe.princeton.edu}
+defaults: {dns: pending, cpu: 2.0}
+servers:
+  dept:                                  # chat.orfe.princeton.edu (+ the /<slug> redirects)
+    kind: dedicated
+    host: chat.orfe.princeton.edu
+    realm: {name: ORFE, owner: {email: …, name: …}}
+  groups:                                # <slug>.chat.orfe.princeton.edu, one realm per group
+    kind: shared
+    external_host: groups.chat.orfe.princeton.edu
+    realm_domain: chat.orfe.princeton.edu
+    realms:
+      - {slug: ahmadi-group, name: Ahmadi Group, owner: {email: …, name: …}}
+```
+
+- The schema is in [`schema/chat.schema.json`](schema/chat.schema.json).
+- `tools/render.py render <dept>` validates the file and writes `generated/`. It checks:
+  - reserved Zulip subdomains and routes;
+  - duplicate slugs and hostnames;
+  - Azure name lengths;
+  - that gated servers have a fallback and a certificate.
+- `render --check` is the CI gate that fails when `generated/` is stale.
+
+## First deployment (bootstrap)
+
+You need Owner on the subscription, the right to create Entra app registrations, `az`, `jq`, `zsh`, `python3`, and the Resend API key.
+
+```zsh
+git clone git@github.com:pu-orfe/chat-config.git && cd chat-config
+git clone https://github.com/pu-shd/chat.git .chat-template && git -C .chat-template checkout "$(jq -r .sha template.lock)"
+.chat-template/scripts/setup-venv.zsh
+.chat-template/scripts/bootstrap.zsh --config orfe --set-gh-vars
+```
+
+`bootstrap.zsh` runs these steps; each is idempotent, and `--from <step>` resumes after a fix:
+
+| Step | Script | What it does |
+|---|---|---|
+| `prereqs` | | tools, venv, Azure login, `render --check` |
+| `platform` | `deploy-platform.zsh` | resource group, Key Vault, network, environment, PostgreSQL, storage |
+| `github` | `setup-github-oidc.zsh` | CI app registration with federated credentials for the Environments `orfe` and `orfe-admin`; Contributor on the resource group; Key Vault Secrets Officer. With `--set-gh-vars`, it also runs `setup-github-repo.zsh` (see Security model) and sets the `AZURE_*` repository variables |
+| `secrets` | | asks for the Resend key (goes to Key Vault) and, optionally, `PUGWIPS_READ_TOKEN` (becomes a GitHub secret). With Healthchecks enabled, also the ping key (Key Vault and GitHub `HEALTHCHECKS_PING_KEY`) and, optionally, the API key |
+| `entra` | `entra-app.zsh` | per server: Zulip's sign-in app registration and redirect URIs; the client secret goes straight into Key Vault |
+| `access` | `grant-access.zsh` | per server: its two managed identities, each granted read on only its own Key Vault secrets |
+| `servers` | `deploy-server.zsh` | per server; the redirect host goes last |
+| `healthchecks` | `healthchecks.zsh --sync` | when enabled and an API key exists: creates the checks with their schedules |
+| `smoke` | `smoke.zsh` | realm answers, Entra redirect, `/<slug>` redirects |
+| `dns` | `bind-domain.zsh --print` | writes `dns-request-<dept>.md`, the ticket for OIT |
+
+Before the first bootstrap, cut a template release (`git tag v0.1.0 && git push --tags`).
+Then make the `ghcr.io/pu-shd/chat` package public. Copy the release's `template.lock` asset (ref, commit sha and `image@sha256`) into the config repo, and pin its `uses:` lines to that sha.
+
+## Running and testing before DNS exists
+
+Every server is `dns: pending` until you say otherwise. A pending server is configured for, and answers on, its Container App name, which Azure already covers with TLS:
+
+```
+https://orfe-chat-dept.<environment-default-domain>/      ← department (root realm)
+https://orfe-chat-groups.<environment-default-domain>/    ← the shared server's preview_realm
+```
+
+**What works while pending:**
+- Sign-in, the web app, and the desktop and mobile apps (add the server by that URL).
+- Email and the `/<slug>` redirects. On the department server, a redirect to a pending server points at that server's preview URL.
+- `.chat-template/.venv/bin/python .chat-template/tools/render.py urls <dept> --default-domain <d>` (or the end of `bootstrap.zsh`) lists what is reachable now and where each realm will be once live.
+
+**Limit on the shared server:** only its `preview_realm` is reachable before DNS, because one Container App name maps to one realm. The other group realms are still created; they become reachable when their CNAMEs exist.
+
+## Going live: CNAMEs for OIT
+
+```zsh
+.chat-template/scripts/bind-domain.zsh --config orfe --server dept --print   # ticket text
+```
+
+Each hostname needs two records. The values come from the platform, so the ticket can be filed as soon as `deploy-platform.zsh` has run:
+
+| Type | Name | Value |
+|---|---|---|
+| CNAME | `chat.orfe.princeton.edu` | `orfe-chat-dept.<environment-default-domain>` |
+| TXT | `asuid.chat.orfe.princeton.edu` | the environment's `customDomainVerificationId` |
+
+**Records needed for the ORFE layout:**
+- **Department:** `chat.orfe.princeton.edu` → the `dept` app.
+- **Shared server, once:**
+  - `groups.chat.orfe.princeton.edu` → the `groups` app;
+  - `auth.groups.chat.orfe.princeton.edu` → the `groups` app. This is the single OIDC callback host for every group realm, so adding a realm needs no Entra change.
+- **Each group realm:** `<slug>.chat.orfe.princeton.edu` → the `groups` app, or → its own app if the group has a dedicated server.
+- `chat.orfe.princeton.edu/<slug>` needs no DNS; it is a redirect.
+
+**Once OIT confirms the records, for each server:**
+1. `bind-domain.zsh --config orfe --server <name> --wait 30` checks the records, then binds each hostname with a free managed certificate.
+   - A server with `ip_gate: true` cannot use a managed certificate, because DigiCert must reach the app. Give it `cert: {key_vault_certificate: <name>}`, for example an OIT/InCommon certificate imported into Key Vault.
+2. Set `dns: live` for that server in `chat.yml`, then `render`.
+3. Run `entra-app.zsh --config orfe --server <name>` to add the live callback URL. The preview URL is kept until `--prune-redirects`.
+4. Commit and push. CI redeploys and Zulip's `EXTERNAL_HOST` switches to the real name.
+   - Mobile and desktop users who added the preview URL re-add the real one.
+
+## Adding a research group
+
+- **Realm on the shared server:** append it to `servers.groups.realms` in `chat.yml`, render, then commit and push.
+  - CI deploys, and the `-mgmt` job creates the realm with its owner.
+  - The owner signs in with Entra.
+  - Then ask OIT for `<slug>.chat.<dept>.princeton.edu` (see `bind-domain.zsh --print`).
+- **Dedicated server:** add a `kind: dedicated` server with `host: <slug>.chat.<dept>.princeton.edu` and `slug: <slug>`.
+  - Run `entra-app.zsh` and `grant-access.zsh` for it once, then push.
+  - The department server's `/<slug>` redirect follows automatically.
+
+Realms are deactivated, never deleted: `realm.zsh --deactivate <slug>`, with type-to-confirm.
+
+## Security model
+
+- **Who can act as CI.** The config repo's Azure identity trusts two GitHub Environments.
+  - `<dept>` (deploy, keepalive, IP gate, update checks) accepts only protected branches, so a pushed feature branch cannot get the Azure token.
+  - `<dept>-admin` (Teardown, realm deactivation) also needs a reviewer's approval.
+  - `setup-github-repo.zsh` protects `main` and configures both environments. The typed confirmation phrases are a second safeguard, not the only one.
+- **What code runs.**
+  - Config repos pin every `uses: pu-shd/chat/...` to a **commit SHA**, with the tag as a comment; release tags in pu-shd/chat are immutable (a ruleset).
+  - Images are **keyless-signed** by the release workflow. Deploys verify the signature against that workflow, which is mandatory in CI.
+  - Third-party actions are pinned to commit SHAs.
+  - The config repo's update check runs new template code only with a read-only token. A separate job, which runs none of it, opens the PR.
+- **Least privilege in Azure.** Each server has its own identities, granted per secret by `grant-access.zsh`:
+  - `<app>-id`: the Zulip app, the `-mgmt` and `-hc` jobs; only its own secrets.
+  - `<app>-db-id`: `-dbinit` only; its database password plus the PostgreSQL admin password.
+  - Nothing has vault-wide read, so a compromised server cannot read another server's secrets or the admin password.
+  - Key Vault has purge protection: deleted secrets stay recoverable for 90 days.
+- **Secrets never on command lines or in logs.** Key Vault values go through 0600 files. The Healthchecks key reaches curl as config on stdin. psql and Redis read passwords from files. The CI stand-in tests assert this.
+- **Inputs are data.**
+  - `chat.yml` text fields reject control characters and leading `-`/brackets, and rendered settings are checked before deploy (docker-zulip pastes bracketed values into settings.py as Python).
+  - Job arguments that look like options are refused.
+  - Workflow inputs are validated per action and passed through `env:`.
+  - IP-gate ranges must be strict IPv4 CIDRs no wider than /8. Downloads from `fallback_url` must be signed.
+- **Sign-up.** A shared server's Entra app admits everyone assigned to it into *every* realm on it. On shared servers, OIDC `auto_signup` therefore defaults to off (invitation only); give a group that needs a separate audience its own server and Entra group.
+- **Proxy trust.** Zulip trusts `X-Forwarded-*` from the whole Container Apps subnet (`LOADBALANCER_IPS`). That subnet includes other apps in the environment, so keep unrelated workloads out of a department's environment.
+
+## Monitoring with Healthchecks.io (optional)
+
+```yaml
+healthchecks:
+  enabled: true
+  # ping_base: https://hc-ping.com         # or a self-hosted Healthchecks
+  # api_base: https://healthchecks.io/api/v3
+  # health_interval_minutes: 5
+```
+
+| Check (slug) | Pinged by | Schedule |
+|---|---|---|
+| `<prefix>-<server>-health` | the server's `<app>-hc` scheduled job: `GET /health` from inside the environment. It works with the IP gate on and before DNS exists, and exercises nginx, Django, PostgreSQL and the sidecars | every 5 min |
+| `<prefix>-<server>-web` | the config repo's daily Keepalive, run from GitHub: realms answer, Entra sign-in redirects, `/<slug>` redirects, TLS and Entra-secret expiry | daily |
+| `<prefix>-<server>-ip-gate` | the daily IP gate refresh (gated servers only) | daily |
+| `<prefix>-updates` | the config repo's weekly Update check | weekly |
+
+- Every ping uses the project **ping key** plus the slug (`https://hc-ping.com/<key>/<slug>`), so there is no per-check URL to store.
+  - The ping key lives in Key Vault as `healthchecks-ping-key`, which the `-hc` job reads.
+  - It is also the GitHub secret `HEALTHCHECKS_PING_KEY`, which CI uses.
+- With the project **API key** (`healthchecks-api-key` in Key Vault, or the GitHub secret `HEALTHCHECKS_API_KEY`), `healthchecks.zsh --sync` creates or updates every check with the schedules above. Deploys run it automatically.
+- Without the API key, checks are created by their first ping with Healthchecks' default schedule, which you then adjust in the UI.
+- A failure pings `/fail` with the reason, so the alert is immediate.
+- A ping that cannot be sent is a workflow warning, never a silent skip.
+
+## Keepalive and update checks
+
+| Repo | Workflow | Schedule | What it does |
+|---|---|---|---|
+| config | **Keepalive** | daily | `keepalive.zsh` for every server. Smoke test; TLS certificates (fail under 14 days); the Entra client secret, whose expiry `entra-app.zsh` records on its Key Vault secret (fail under 21 days); pugwips snapshot age; then pings `-web`. Also re-enables the repo's scheduled workflows, so GitHub's 60-day inactivity rule never switches them off |
+| config | **Update check** | weekly | Up to two PRs. `auto/template`: a newer pu-shd/chat release, with `template.lock` and every `uses: …@ref` bumped, `generated/` re-rendered by the new template, and config tests run. `auto/pugwips`: the IP gate's static snapshot refreshed from the signed pugwips release (needs `PUGWIPS_READ_TOKEN`) |
+| template | **Update check** | weekly | `tools/updates.py zulip`: the Zulip image (new release or upstream rebuild, tag plus digest); sidecar images (newest in the *same* major; new majors are only reported); the bicep CLI; regenerates the reserved-name list for a new Zulip version. Runs the test suite, then opens `auto/updates` |
+| template | **Keepalive** | weekly | re-enables its scheduled workflows |
+| template | Dependabot | weekly | GitHub Actions, pip, the test image's base |
+
+- An update check that cannot reach a registry fails the run; it never reports "no updates".
+- PRs opened with the default `GITHUB_TOKEN` do not trigger CI, and cannot change workflow files.
+  - Add a fine-grained token as `UPDATE_PR_TOKEN`: Contents and Pull requests: write in the template repo, and **also Workflows: write** in config repos.
+  - A config repo's template PR fails clearly without it, because it changes the pinned `uses:` lines.
+- **The upgrade path:**
+  1. Merge the template PR.
+  2. Tag a release. It publishes the image and a `template.lock` asset.
+  3. Each department's Update check opens its PR.
+  4. Merging that redeploys, with the maintenance stop described under Day 2.
+
+## Teardown
+
+| Where | How |
+|---|---|
+| Locally | `scripts/teardown.zsh --config orfe [--server x] [--purge] [--healthchecks] [--entra] [--platform] [--github]`, the reverse of `bootstrap.zsh`. It asks for one confirmation, `TEARDOWN <dept>` (or `TEARDOWN <dept> PURGE`) |
+| CI | the config repo's **Teardown** workflow (manual): dept, one server or all, purge, platform, and the same phrase |
+
+| Mode | Effect |
+|---|---|
+| preserve (default) | Deletes apps and jobs. Databases, uploads, secrets, identities and the hostname bindings (saved to Key Vault) stay, so the Deploy workflow (or `bootstrap.zsh --from servers`) restores the servers with their hostnames |
+| `--purge` | Also destroys databases, uploads, per-server identities and secrets. Deleted secrets stay recoverable for 90 days (purge protection); redeploying the same server name recovers them |
+| `--platform` | Deletes the resource group. Needs `--purge` and every server |
+| `--entra`, `--github` | Delete the Zulip sign-in app registrations and CI's own access. Operator only, because CI has no Entra rights |
+
+The single-server scripts (`teardown-server.zsh`, `teardown-platform.zsh`) remain available and have their own confirmations.
+
+## Day 2
+
+| Task | Command (or the config repo's **Operate** workflow) |
+|---|---|
+| Upgrade Zulip | Bump `ZULIP_IMAGE` in `image/Dockerfile`, tag a release, update `template.lock` plus the `@ref` in the config repo's workflows. The deploy stops the old revision, so only one Zulip migrates, and records a PostgreSQL restore point |
+| Refresh IP gate | Daily `ip-gate.yml`, or `ip-gate.zsh --apply` |
+| Check mail | `realm.zsh --send-test-email you@princeton.edu` |
+| Mobile push | Apply for Zulip's free Community plan for each organization, then `realm.zsh --register-push` and set `push_notifications: true` |
+| Rotate the Entra secret | `entra-app.zsh --rotate-secret`, then `update-server.zsh --restart`, then `entra-app.zsh --prune-old-secrets`; until then the old secret still works |
+| Health right now | `keepalive.zsh --config <dept>`; with Healthchecks, `healthchecks.zsh --list` |
+| Remove servers or everything | `teardown.zsh`, or the Teardown workflow (see Teardown above) |
+
+## Tests
+
+| Command | What runs |
+|---|---|
+| `docker-compose -f tests/docker-compose.yml run --rm tests` | Unit and integration tests. The renderer, every zsh script against recording `az`/`gh`/`dig`/`curl`/`cosign` stand-ins that fail on any unexpected call, the Bicep templates, the image entrypoint, and `chat-dbinit` against a real PostgreSQL 17 whose admin, like Azure's, is not a superuser |
+| `tests/e2e/run.zsh` | Builds the image and boots Zulip with settings rendered from a real `chat.yml`, using the same sidecar commands as Bicep plus a mock Entra, a mail sink and a mock Healthchecks. It then checks health and proxy trust, the redirects, realm creation through the mgmt job, a complete OIDC sign-in, outgoing mail, and the `-hc` probe's success and failure pings |
+
+CI (`.github/workflows/ci.yml`) runs both, plus actionlint.
+
+## Not yet verified on Azure
+
+These depend on Azure behaviour that the local tests cannot reproduce. Check them in a scratch resource group before the first real deployment:
+- PostgreSQL Flexible Server accepts `LC_COLLATE 'C.UTF-8'`. Tested on PostgreSQL 17 locally; `chat-dbinit` fails loudly if Azure disagrees.
+- docker-zulip's `chown` of `/data/uploads` on the NFS share (`NoRootSquash`).
+- `LOADBALANCER_IPS` set to the environment subnet: the ingress proxy's `X-Forwarded-For` must be trusted, and public clients must be denied `/health`.
+- The `-mgmt` job reaching the sidecars through `additionalPortMappings` while IP restrictions are on. The gate adds an `aca-internal` allow rule for the subnet.
+- `az containerapp job logs show` output, which `run_job` parses. It falls back to Log Analytics.
+- The `-hc` job reaching `http://<app>:8080/health` through the internal-only TCP port mapping (plain HTTP, no redirect).
+- `az containerapp job start --env-vars` merging with (not replacing) the job's environment. The purge teardown relies on it and checks the job's own `dropped` report.
+- Healthchecks' `GET /api/v3/checks/?slug=` filter, which `--sync` uses to find existing checks.

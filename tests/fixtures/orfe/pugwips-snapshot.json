@@ -1,0 +1,15 @@
+{
+  "_note": "TEST FIXTURE: synthetic ranges (RFC 5737 / RFC 6598), not real pugwips data.",
+  "snapshot_date": "2026-09-04",
+  "source": "synthetic test fixture",
+  "prefix_mode": "vendor",
+  "prefixes": [
+    "192.0.2.97/32",
+    "100.64.0.0/16",
+    "100.65.0.0/16",
+    "203.0.112.0/20",
+    "100.66.0.0/20",
+    "198.51.0.0/17",
+    "100.67.0.0/16"
+  ]
+}

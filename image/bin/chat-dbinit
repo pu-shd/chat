@@ -1,0 +1,59 @@
+#!/bin/sh
+# chat-dbinit — create or update one Zulip server's database and role on the
+# department's shared PostgreSQL Flexible Server. Idempotent; run by the
+# <app>-dbinit job (postgres:17-alpine) before every app deploy.
+#
+# Mirrors zulip/scripts/setup/create-db.sql (C.UTF-8 database owned by the
+# Zulip role) without its DROP DATABASE. Azure's admin is not a superuser, so it
+# must be able to SET ROLE to the Zulip role before it can create a database owned
+# by it. Needs PostgreSQL 16+ (the platform runs 17).
+#
+# Env: PGHOST PGUSER (admin) PGADMIN_PASSWORD_FILE DB_NAME DB_USER DB_PASSWORD_FILE
+#      DB_ACTION=ensure|drop   (drop is used only by teardown --purge)
+set -eu
+
+: "${PGHOST:?}" "${PGUSER:?}" "${PGADMIN_PASSWORD_FILE:?}" "${DB_NAME:?}" "${DB_USER:?}" "${DB_PASSWORD_FILE:?}"
+PGPASSWORD="$(cat "$PGADMIN_PASSWORD_FILE")"
+export PGPASSWORD PGSSLMODE="${PGSSLMODE:-require}" PGDATABASE=postgres
+DB_PASSWORD="$(cat "$DB_PASSWORD_FILE")"
+[ -n "$PGPASSWORD" ] || { echo "CHAT-RESULT: {\"ok\": false, \"error\": \"empty admin password\"}"; exit 1; }
+[ -n "$DB_PASSWORD" ] || { echo "CHAT-RESULT: {\"ok\": false, \"error\": \"empty database password\"}"; exit 1; }
+
+case "${DB_ACTION:-ensure}" in
+ensure)
+    # The Zulip role's password is read from its file by psql itself, never argv.
+    export DB_PASSWORD_FILE
+    psql -v ON_ERROR_STOP=1 -q -v dbname="$DB_NAME" -v dbuser="$DB_USER" <<'SQL'
+\set dbpass `cat "$DB_PASSWORD_FILE"`
+SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', :'dbuser', :'dbpass')
+ WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = :'dbuser') \gexec
+SELECT format('ALTER ROLE %I LOGIN PASSWORD %L', :'dbuser', :'dbpass') \gexec
+-- PostgreSQL 16+: a CREATEROLE admin is implicitly granted the roles it creates, but
+-- without SET, and CREATE DATABASE ... OWNER needs SET.
+SELECT format('GRANT %I TO CURRENT_USER WITH SET TRUE, INHERIT FALSE', :'dbuser')
+ WHERE NOT pg_has_role(CURRENT_USER, :'dbuser', 'SET') \gexec
+SELECT format('CREATE DATABASE %I OWNER %I ENCODING UTF8 LC_COLLATE %L LC_CTYPE %L TEMPLATE template0',
+              :'dbname', :'dbuser', 'C.UTF-8', 'C.UTF-8')
+ WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = :'dbname') \gexec
+SELECT format('ALTER DATABASE %I OWNER TO %I', :'dbname', :'dbuser') \gexec
+SQL
+    collate="$(psql -At -v dbname="$DB_NAME" -c "SELECT datcollate FROM pg_database WHERE datname = '$DB_NAME'")"
+    if [ "$collate" != "C.UTF-8" ]; then
+        echo "CHAT-RESULT: {\"ok\": false, \"error\": \"database $DB_NAME has collation '$collate', Zulip needs C.UTF-8\"}"
+        exit 1
+    fi
+    echo "CHAT-RESULT: {\"ok\": true, \"database\": \"$DB_NAME\", \"collation\": \"$collate\"}"
+    ;;
+drop)
+    psql -v ON_ERROR_STOP=1 -q -v dbname="$DB_NAME" -v dbuser="$DB_USER" <<'SQL'
+-- Only the owner may drop a database; the admin can SET ROLE to it (see ensure).
+SELECT format('SET ROLE %I', :'dbuser') WHERE EXISTS (SELECT FROM pg_roles WHERE rolname = :'dbuser') \gexec
+SELECT format('DROP DATABASE IF EXISTS %I WITH (FORCE)', :'dbname') \gexec
+RESET ROLE;
+SELECT format('DROP ROLE IF EXISTS %I', :'dbuser') \gexec
+SQL
+    echo "CHAT-RESULT: {\"ok\": true, \"database\": \"$DB_NAME\", \"dropped\": true}"
+    ;;
+*)
+    echo "CHAT-RESULT: {\"ok\": false, \"error\": \"unknown DB_ACTION\"}"; exit 2 ;;
+esac

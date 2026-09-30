@@ -1,0 +1,66 @@
+name: Update check
+
+# Weekly: newer Zulip image (tag or upstream rebuild), sidecar images (same major only),
+# bicep CLI. Opens or refreshes one PR (branch auto/updates) with the pins rewritten and
+# the reserved-name list regenerated for a new Zulip version. Merge it, then tag a
+# release; each config repo's own update check then offers the new release.
+#
+# PRs opened with the default GITHUB_TOKEN do not trigger CI. Add a fine-grained token
+# (contents + pull requests: write) as the secret UPDATE_PR_TOKEN so they do.
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with: {persist-credentials: false}
+      - uses: actions/setup-python@v7
+        with: {python-version: "3.12"}
+      - name: Find updates
+        id: updates
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python -m venv .venv && .venv/bin/pip install -q -r tools/requirements.txt
+          .venv/bin/python tools/updates.py zulip --apply | tee summary.md
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Test the updated pins
+        if: steps.updates.outputs.changed == 'true'
+        run: docker compose -f tests/docker-compose.yml run --rm tests
+      - name: Open or update the PR
+        if: steps.updates.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ secrets.UPDATE_PR_TOKEN || github.token }}
+          branch: auto/updates
+          delete-branch: true
+          commit-message: ${{ steps.updates.outputs.title }}
+          title: ${{ steps.updates.outputs.title }}
+          body-path: summary.md
+          labels: dependencies
+          add-paths: |
+            image/Dockerfile
+            infra/server.bicep
+            tests/Dockerfile
+            tools/zulip_reserved.py
+      - name: Healthchecks (optional)
+        if: always()
+        env:
+          PING: ${{ secrets.HEALTHCHECKS_PING_URL }}
+          OUTCOME: ${{ job.status }}
+        run: |
+          [ -n "$PING" ] || { echo "no HEALTHCHECKS_PING_URL secret; not pinging"; exit 0; }
+          [ "$OUTCOME" = success ] && suffix="" || suffix=/fail
+          # The URL is the secret: give it to curl on stdin, not argv.
+          printf 'url = "%s"\n' "$PING$suffix" | curl -fsS -m 10 --retry 3 -o /dev/null -K - \
+            || echo "::warning::healthchecks ping failed"

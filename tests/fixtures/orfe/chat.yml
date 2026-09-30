@@ -1,0 +1,33 @@
+# Test fixture: a department with every server shape.
+department: orfe
+azure:
+  tenant_id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+  subscription_id: bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb
+  region: canadacentral
+  prefix: orfe-chat
+github: {repo: pu-orfe/chat-config, environment: orfe}
+admin_email: admin@example.edu
+email: {provider: resend, from: noreply@orfe.example.edu}
+ip_gate:
+  prefix_mode: vendor
+  snapshot: pugwips-snapshot.json
+servers:
+  dept:
+    kind: dedicated
+    host: chat.orfe.example.edu
+    realm: {name: ORFE, owner: {email: admin@example.edu, name: Admin}}
+    entra: {client_id: 11111111-1111-1111-1111-111111111111}
+  groups:
+    kind: shared
+    external_host: groups.chat.orfe.example.edu
+    realm_domain: chat.orfe.example.edu
+    realms:
+      - {slug: ahmadi-group, name: Ahmadi Group, owner: {email: pi@example.edu, name: PI}}
+      - {slug: beta-lab, name: Beta Lab, owner: {email: beta@example.edu, name: Beta}}
+    entra: {client_id: 22222222-2222-2222-2222-222222222222}
+  lab:
+    kind: dedicated
+    host: lab.chat.orfe.example.edu
+    slug: lab
+    ip_gate: true
+    realm: {name: Lab, owner: {email: lab@example.edu, name: Lab Owner}}

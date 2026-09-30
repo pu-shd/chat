@@ -1,0 +1,165 @@
+# End-to-end: the pu-shd/chat image booted with settings rendered from a real chat.yml,
+# against PostgreSQL (non-superuser admin, like Azure), the same sidecar commands as
+# infra/server.bicep, a mock Entra (OIDC) and a mail sink. Driven by tests/e2e/run.zsh.
+x-secret-files: &secrets
+  - zulip__secret_key
+  - zulip__postgres_password
+  - zulip__redis_password
+  - zulip__rabbitmq_password
+  - zulip__memcached_password
+  - zulip__social_auth_oidc_secret
+  - zulip__email_password
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: superuser-only-for-setup
+    volumes:
+      - ../pg:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "psql -U postgres -tAc \"SELECT 1 FROM pg_roles WHERE rolname='chatadmin'\" | grep -q 1"]
+      interval: 2s
+      retries: 30
+    networks: [e2e]
+
+  dbinit:  # = the <app>-dbinit job
+    image: postgres:17
+    entrypoint: ["sh", "/chat-dbinit"]
+    volumes:
+      - ../../image/bin/chat-dbinit:/chat-dbinit:ro
+    environment:
+      PGHOST: postgres
+      PGUSER: chatadmin
+      PGSSLMODE: disable
+      PGADMIN_PASSWORD_FILE: /run/secrets/pg_admin_password
+      DB_NAME: zulip_dept
+      DB_USER: zulip_dept
+      DB_PASSWORD_FILE: /run/secrets/zulip__postgres_password
+    secrets: [pg_admin_password, zulip__postgres_password]
+    depends_on:
+      postgres: {condition: service_healthy}
+    networks: [e2e]
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["sh", "-c", "umask 077 && printf 'requirepass %s\\nbind 0.0.0.0\\nprotected-mode no\\nsave \"\"\\nappendonly no\\n' \"$$(cat /run/secrets/zulip__redis_password)\" > /tmp/redis.conf && exec redis-server /tmp/redis.conf"]
+    secrets: [zulip__redis_password]
+    networks: [e2e]
+
+  memcached:
+    image: memcached:1.6-alpine
+    command:
+      - sh
+      - -euc
+      - |
+        MEMCACHED_PASSWORD="$$(cat /run/secrets/zulip__memcached_password)"
+        mkdir -p /home/memcache
+        echo 'mech_list: plain' > "$$SASL_CONF_PATH"
+        echo "zulip@$$HOSTNAME:$$MEMCACHED_PASSWORD" > "$$MEMCACHED_SASL_PWDB"
+        echo "zulip@localhost:$$MEMCACHED_PASSWORD" >> "$$MEMCACHED_SASL_PWDB"
+        exec memcached -S -m 256
+    environment:
+      SASL_CONF_PATH: /home/memcache/memcached.conf
+      MEMCACHED_SASL_PWDB: /home/memcache/memcached-sasl-db
+    secrets: [zulip__memcached_password]
+    networks: [e2e]
+
+  rabbitmq:
+    image: rabbitmq:4.2-alpine
+    command:
+      - sh
+      - -euc
+      - |
+        mkdir -p /etc/rabbitmq/conf.d
+        printf 'default_user = zulip\ndefault_pass = %s\n' "$$(cat /run/secrets/zulip__rabbitmq_password)" > /etc/rabbitmq/conf.d/10-chat.conf
+        exec docker-entrypoint.sh rabbitmq-server
+    secrets: [zulip__rabbitmq_password]
+    networks: [e2e]
+
+  oidc:  # stands in for login.microsoftonline.com/<tenant>/v2.0
+    image: ghcr.io/navikt/mock-oauth2-server:2.1.10
+    environment:
+      SERVER_PORT: "8080"
+      JSON_CONFIG: >-
+        {"interactiveLogin": false,
+         "tokenCallbacks": [{"issuerId": "entra", "tokenExpiry": 3600,
+           "requestMappings": [{"requestParam": "grant_type", "match": "*",
+             "claims": {"sub": "owner", "email": "owner@e2e.test", "name": "E2E Owner",
+                        "preferred_username": "owner@e2e.test", "aud": ["11111111-2222-3333-4444-555555555555"]}}]}]}
+    networks: [e2e]
+
+  mailpit:  # stands in for smtp.resend.com
+    image: axllent/mailpit:v1.27
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "1"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+    networks: [e2e]
+
+  hc:  # stands in for hc-ping.com
+    image: python:3.12-slim
+    command: ["python", "-u", "/hc_mock.py"]
+    volumes: ["./hc_mock.py:/hc_mock.py:ro"]
+    networks: [e2e]
+
+  hcjob:  # = the <app>-hc scheduled job (same script, same image family)
+    image: curlimages/curl:8.16.0
+    profiles: [jobs]
+    entrypoint: ["sh", "/chat-hc-ping"]
+    volumes: ["../../image/bin/chat-hc-ping:/chat-hc-ping:ro"]
+    environment:
+      CHAT_HC_TARGET: http://zulip/health
+      HC_PING_BASE: http://hc:8000
+      HC_SLUG: e2e-chat-dept-health
+      HC_PING_KEY_FILE: /run/secrets/hc_ping_key
+    secrets: [hc_ping_key]
+    networks: [e2e]
+
+  zulip:
+    build: {context: ../../image}
+    image: pu-shd-chat:e2e
+    secrets: *secrets
+    volumes: [zulip-data:/data]
+    depends_on:
+      dbinit: {condition: service_completed_successfully}
+      redis: {condition: service_started}
+      memcached: {condition: service_started}
+      rabbitmq: {condition: service_started}
+      oidc: {condition: service_started}
+      mailpit: {condition: service_started}
+      hc: {condition: service_started}
+    networks:
+      e2e:
+        aliases: [chat.e2e.test]
+
+  mgmt:  # = the <app>-mgmt job
+    image: pu-shd-chat:e2e
+    profiles: [jobs]
+    secrets: *secrets
+    volumes: [zulip-data:/data]
+    networks: [e2e]
+
+  runner:
+    build: {context: ../.., dockerfile: tests/Dockerfile}
+    profiles: [jobs]
+    command: ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests/e2e/test_e2e.py"]
+    environment:
+      CHAT_E2E: "1"
+    networks: [e2e]
+
+volumes:
+  zulip-data:
+
+networks:
+  e2e: {}
+
+secrets:
+  hc_ping_key: {file: .state/secrets/hc_ping_key}
+  pg_admin_password: {file: .state/secrets/pg_admin_password}
+  zulip__secret_key: {file: .state/secrets/zulip__secret_key}
+  zulip__postgres_password: {file: .state/secrets/zulip__postgres_password}
+  zulip__redis_password: {file: .state/secrets/zulip__redis_password}
+  zulip__rabbitmq_password: {file: .state/secrets/zulip__rabbitmq_password}
+  zulip__memcached_password: {file: .state/secrets/zulip__memcached_password}
+  zulip__social_auth_oidc_secret: {file: .state/secrets/zulip__social_auth_oidc_secret}
+  zulip__email_password: {file: .state/secrets/zulip__email_password}

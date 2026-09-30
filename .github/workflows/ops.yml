@@ -1,0 +1,111 @@
+name: Operate a Zulip server (reusable)
+
+# One entry point for day-2 actions from a config repo:
+#   keepalive    smoke + TLS/secret expiry for every server (or one), Healthchecks ping
+#   healthchecks-sync
+#   teardown-dept  scripts/teardown.zsh; `argument` = its flags (--purge --platform ...)
+#   ip-gate      recompute and apply the pugwips allowlist
+#   realm-list | realm-ensure | realm-deactivate
+#   send-test-email | register-push | restart
+#   teardown | teardown-purge   (need `confirm` = the exact phrase the script asks for)
+on:
+  workflow_call:
+    inputs:
+      config_dir: {type: string, required: true}
+      server: {type: string, required: false, default: ""}
+      environment: {type: string, required: true}
+      template_ref: {type: string, required: true}
+      action: {type: string, required: true}
+      argument: {type: string, required: false, default: ""}
+      confirm: {type: string, required: false, default: ""}
+      azure_client_id: {type: string, required: true}
+      azure_tenant_id: {type: string, required: true}
+      azure_subscription_id: {type: string, required: true}
+    secrets:
+      PUGWIPS_READ_TOKEN: {required: false}
+      HEALTHCHECKS_PING_KEY: {required: false}
+      HEALTHCHECKS_API_KEY: {required: false}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  op:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: chat-${{ inputs.environment }}-${{ inputs.server }}
+      cancel-in-progress: false
+    timeout-minutes: 45
+    env:
+      CHAT_PY: ${{ github.workspace }}/.chat-template/.venv/bin/python
+      PUGWIPS_READ_TOKEN: ${{ secrets.PUGWIPS_READ_TOKEN }}
+      HEALTHCHECKS_PING_KEY: ${{ secrets.HEALTHCHECKS_PING_KEY }}
+      HEALTHCHECKS_API_KEY: ${{ secrets.HEALTHCHECKS_API_KEY }}
+      CHAT_CONFIRM: ${{ inputs.confirm }}
+      CFG: ${{ inputs.config_dir }}
+      SRV: ${{ inputs.server }}
+      ARG: ${{ inputs.argument }}
+      ACTION: ${{ inputs.action }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with: {repository: pu-shd/chat, ref: "${{ inputs.template_ref }}", path: .chat-template}
+      - uses: actions/setup-python@v7
+        with: {python-version: "3.12"}
+      - name: Tools
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq zsh jq
+          zsh .chat-template/scripts/setup-venv.zsh
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.10.1
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ inputs.azure_client_id }}
+          tenant-id: ${{ inputs.azure_tenant_id }}
+          subscription-id: ${{ inputs.azure_subscription_id }}
+      - name: Run
+        shell: bash
+        run: |
+          S=.chat-template/scripts
+          # Inputs are data: accept only the shapes each action needs.
+          [[ "$CFG" =~ ^[a-z][a-z0-9]{1,11}$ ]] || { echo "bad config_dir"; exit 2; }
+          [[ -z "$SRV" || "$SRV" =~ ^[a-z][a-z0-9-]{0,14}[a-z0-9]$ ]] || { echo "bad server"; exit 2; }
+          case "$ACTION" in
+            realm-ensure|realm-deactivate) [[ "$ARG" =~ ^(_root|[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?)$ ]] || { echo "argument must be a realm slug or _root"; exit 2; } ;;
+            send-test-email) [[ "$ARG" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || { echo "argument must be an email address"; exit 2; } ;;
+            teardown-dept) [[ "$ARG" =~ ^[[:space:]a-z-]*$ ]] || { echo "argument must be teardown.zsh flags"; exit 2; } ;;
+            *) [[ -z "$ARG" ]] || { echo "$ACTION takes no argument"; exit 2; } ;;
+          esac
+          srv=(); [ -n "$SRV" ] && srv=(--server "$SRV")
+          case "$ACTION" in
+            keepalive)        zsh $S/keepalive.zsh --config "$CFG" "${srv[@]}" --runner-ip auto ;;
+            healthchecks-sync) zsh $S/healthchecks.zsh --config "$CFG" --sync ;;
+            # ARG holds teardown.zsh flags; teardown.zsh rejects any it does not know.
+            teardown-dept)    read -r -a flags <<<"$ARG"; zsh $S/teardown.zsh --config "$CFG" "${srv[@]}" "${flags[@]}" ;;
+            ip-gate)
+              slug="$(jq -r '.healthchecks.ip_gate // empty' "$CFG/generated/servers/$SRV.json")"
+              if zsh $S/ip-gate.zsh --config "$CFG" --server "$SRV" --apply; then
+                [ -z "$slug" ] || zsh $S/healthchecks.zsh --config "$CFG" --ping "$slug"
+              else
+                [ -z "$slug" ] || zsh $S/healthchecks.zsh --config "$CFG" --ping "$slug" --fail --message "ip-gate apply failed: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+                exit 1
+              fi ;;
+            realm-list)       zsh $S/realm.zsh --config "$CFG" --server "$SRV" --list ;;
+            realm-ensure)     zsh $S/realm.zsh --config "$CFG" --server "$SRV" --ensure "$ARG" ;;
+            realm-deactivate) zsh $S/realm.zsh --config "$CFG" --server "$SRV" --deactivate "$ARG" ;;
+            register-push)    zsh $S/realm.zsh --config "$CFG" --server "$SRV" --register-push ;;
+            send-test-email)  zsh $S/realm.zsh --config "$CFG" --server "$SRV" --send-test-email "$ARG" ;;
+            restart)          zsh $S/update-server.zsh --config "$CFG" --server "$SRV" --restart ;;
+            teardown)         zsh $S/teardown-server.zsh --config "$CFG" --server "$SRV" ;;
+            teardown-purge)   zsh $S/teardown-server.zsh --config "$CFG" --server "$SRV" --purge ;;
+            *) echo "unknown action: $ACTION"; exit 2 ;;
+          esac
+      - name: Remove temporary IP rules
+        if: always() && (inputs.action == 'keepalive')
+        run: |
+          for f in "$CFG"/generated/servers/*.json; do
+            [ "$(jq -r .ip_gate "$f")" = true ] || continue
+            s="$(jq -r .name "$f")"; [ -z "$SRV" ] || [ "$SRV" = "$s" ] || continue
+            zsh .chat-template/scripts/ip-gate.zsh --config "$CFG" --server "$s" --remove-temp || echo "::warning::could not remove the temporary rule on $s"
+          done

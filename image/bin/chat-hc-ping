@@ -1,0 +1,33 @@
+#!/bin/sh
+# chat-hc-ping — one Healthchecks.io probe, run by the <app>-hc scheduled job
+# (curlimages/curl) every few minutes, from inside the Container Apps environment.
+#
+# GET http://<app>:8080/health (an internal-only TCP port mapping to Zulip's nginx, so
+# no HTTPS redirect) goes through the environment's internal network, which
+# Zulip's nginx trusts (LOADBALANCER_IPS = the environment subnet), so it works with
+# the IP gate on and before DNS exists. It exercises nginx, Django, PostgreSQL and the
+# sidecars. Success pings <ping_base>/<ping_key>/<slug>; failure pings .../fail with the
+# reason, so Healthchecks alerts at once instead of waiting for the grace period.
+#
+# Env: CHAT_HC_TARGET (http://<app>:8080/health) HC_PING_BASE HC_SLUG HC_PING_KEY_FILE
+set -u
+: "${CHAT_HC_TARGET:?}" "${HC_PING_BASE:?}" "${HC_SLUG:?}" "${HC_PING_KEY_FILE:?}"
+key="$(cat "$HC_PING_KEY_FILE")"
+[ -n "$key" ] || { echo "chat-hc-ping: empty ping key"; exit 1; }
+ping="$HC_PING_BASE/$key/$HC_SLUG"
+
+code="$(curl -sS -o /tmp/body -m 20 -w '%{http_code}' "$CHAT_HC_TARGET" 2>/tmp/err)" || code="000"
+# The ping URL contains the key: pass it to curl as config on stdin, never argv.
+hc() {  # hc <url> [curl options...]
+    url="$1"; shift
+    printf 'url = "%s"\n' "$url" | curl -fsS -m 10 --retry 3 -o /dev/null "$@" -K -
+}
+if [ "$code" = 200 ]; then
+    hc "$ping?create=1" || { echo "chat-hc-ping: could not reach $HC_PING_BASE"; exit 1; }
+    echo "chat-hc-ping: $CHAT_HC_TARGET ok"
+else
+    reason="$CHAT_HC_TARGET returned $code: $(head -c 300 /tmp/body 2>/dev/null) $(head -c 300 /tmp/err 2>/dev/null)"
+    hc "$ping/fail?create=1" --data-raw "$reason" || true
+    echo "chat-hc-ping: FAIL $reason"
+    exit 1
+fi

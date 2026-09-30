@@ -1,0 +1,31 @@
+name: Keepalive
+
+# GitHub disables scheduled workflows in a repository with no activity for 60 days,
+# which would silently stop the update checks. Re-enabling them through the API resets
+# that clock without commits.
+on:
+  schedule:
+    - cron: "41 7 * * 0"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Re-enable scheduled workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          n=0
+          for f in .github/workflows/*.yml; do
+            grep -qE '^\s+- cron:' "$f" || continue
+            gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/$(basename "$f")/enable"
+            echo "kept alive: $f"; n=$((n + 1))
+          done
+          [ "$n" -gt 0 ] || { echo "no scheduled workflows found"; exit 1; }

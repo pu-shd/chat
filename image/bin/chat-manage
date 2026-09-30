@@ -1,0 +1,102 @@
+#!/bin/bash
+# chat-manage — idempotent Zulip management for the <app>-mgmt Container Apps job.
+#
+# The job runs in its own replica, so it first runs docker-zulip's `app:init`
+# (render settings.py and zulip-secrets.conf from the same environment and /data
+# share as the app, then apply any pending migrations — a no-op when current),
+# then the requested command. Redis, RabbitMQ and memcached are the app's
+# sidecars, reached over the environment's internal network (see server.bicep).
+#
+#   chat-manage ensure-realm <slug|_root> <name> <owner-email> <owner-full-name>
+#   chat-manage deactivate-realm <slug>
+#   chat-manage list-realms
+#   chat-manage register-push            # push bouncer registration (Community plan)
+#   chat-manage send-test-email <to>     # prove outgoing mail (Resend) works
+#
+# Every command prints exactly one line starting with CHAT-RESULT: {json}, which
+# the calling scripts parse from the job's logs. No such line means failure.
+set -euo pipefail
+
+MANAGE=/home/zulip/deployments/current/manage.py
+
+result() { printf 'CHAT-RESULT: %s\n' "$1"; }
+# result_kv key value [key value...] — a JSON object with ok:true, safely quoted.
+result_kv() {
+    python3 -c 'import json, sys; a = sys.argv[1:]; print("CHAT-RESULT: " + json.dumps({"ok": True, **dict(zip(a[::2], a[1::2]))}))' "$@"
+}
+
+init() {
+    /sbin/entrypoint.sh app:init >/tmp/chat-init.log 2>&1 || {
+        cat /tmp/chat-init.log >&2
+        result '{"ok": false, "error": "app:init failed"}'
+        exit 1
+    }
+}
+
+shell_py() {
+    # Run Python inside Zulip's Django context as the zulip user.
+    su zulip -c "$MANAGE shell --no-startup -c $(printf '%q' "$1")"
+}
+
+cmd="${1:-}"
+shift || true
+case "$cmd" in
+    ensure-realm)
+        [[ $# -eq 4 ]] || { result '{"ok": false, "error": "usage: ensure-realm <slug> <name> <email> <full-name>"}'; exit 2; }
+        init
+        # "_root" is the root-domain realm (string_id ""): az's --args drops empty strings
+        # and expands anything starting with "@" as a file, so neither can stand for it.
+        slug="$1"; [[ "$slug" == "_root" ]] && slug=""
+        export CHAT_SLUG="$slug" CHAT_NAME="$2" CHAT_EMAIL="$3" CHAT_FULL_NAME="$4"
+        shell_py '
+import json, os
+from django.core.management import call_command
+from zerver.models import Realm
+slug, name = os.environ["CHAT_SLUG"], os.environ["CHAT_NAME"]
+email, full = os.environ["CHAT_EMAIL"], os.environ["CHAT_FULL_NAME"]
+realm = Realm.objects.filter(string_id=slug).first()
+if realm is not None:
+    if realm.deactivated:
+        print("CHAT-RESULT: " + json.dumps({"ok": False, "slug": slug, "error": "realm exists but is deactivated; reactivate it deliberately with manage.py reactivate_realm"}))
+    else:
+        print("CHAT-RESULT: " + json.dumps({"ok": True, "slug": slug, "created": False, "url": realm.url}))
+else:
+    # No password: the owner signs in with Entra (OIDC) using this email.
+    # Options as keywords: argparse will not take the user positionals after --string-id.
+    call_command("create_realm", name, email, full, string_id=slug)
+    realm = Realm.objects.get(string_id=slug)
+    print("CHAT-RESULT: " + json.dumps({"ok": True, "slug": slug, "created": True, "url": realm.url}))
+'
+        ;;
+    deactivate-realm)
+        [[ $# -eq 1 && -n "$1" ]] || { result '{"ok": false, "error": "usage: deactivate-realm <slug>"}'; exit 2; }
+        init
+        su zulip -c "$MANAGE deactivate_realm -r $(printf '%q' "$1")"
+        result_kv slug "$1" deactivated yes
+        ;;
+    list-realms)
+        init
+        shell_py '
+import json
+from zerver.models import Realm
+rows = [{"slug": r.string_id, "name": r.name, "deactivated": r.deactivated, "url": r.url} for r in Realm.objects.exclude(string_id="zulipinternal").order_by("string_id")]
+print("CHAT-RESULT: " + json.dumps({"ok": True, "realms": rows}))
+'
+        ;;
+    register-push)
+        init
+        su zulip -c "$MANAGE register_server --agree_to_terms_of_service"
+        result_kv registered yes
+        ;;
+    send-test-email)
+        [[ $# -eq 1 && "$1" == *@* ]] || { result '{"ok": false, "error": "usage: send-test-email <address>"}'; exit 2; }
+        init
+        su zulip -c "$MANAGE send_test_email $(printf '%q' "$1")"
+        result_kv sent_to "$1"
+        ;;
+    *)
+        echo "usage: chat-manage {ensure-realm|deactivate-realm|list-realms|register-push|send-test-email} ..." >&2
+        result '{"ok": false, "error": "unknown command"}'
+        exit 2
+        ;;
+esac

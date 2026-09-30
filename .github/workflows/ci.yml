@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Unit + integration (Docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run test suite in containers
+        run: docker compose -f tests/docker-compose.yml run --rm tests
+      - name: Tear down
+        if: always()
+        run: docker compose -f tests/docker-compose.yml down -v
+
+  e2e:
+    name: End to end (real Zulip, mock Entra)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with: {python-version: "3.12"}
+      - name: Tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh jq
+      - name: Python environment
+        run: zsh scripts/setup-venv.zsh
+      - name: Boot Zulip and test it
+        # docker-compose is the v2 plugin's standalone alias on GitHub runners
+        run: |
+          command -v docker-compose || { printf '#!/bin/sh\nexec docker compose "$@"\n' | sudo tee /usr/local/bin/docker-compose >/dev/null; sudo chmod +x /usr/local/bin/docker-compose; }
+          zsh tests/e2e/run.zsh
+
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: actionlint
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 -color

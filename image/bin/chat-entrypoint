@@ -1,0 +1,50 @@
+#!/bin/bash
+# chat-entrypoint — wraps docker-zulip's /sbin/entrypoint.sh.
+#
+#   app:run | app:init | app:backup | ...   passed straight through
+#   chat:manage <subcommand> [args]         one-shot management (the -mgmt job)
+#
+# Before handing over it writes the chat.<dept>/<slug> redirects into nginx's
+# app.d include. Puppet (run by the upstream entrypoint) manages named files in
+# app.d but does not purge the directory, so ours survives it.
+set -euo pipefail
+
+REDIRECTS_CONF="${CHAT_REDIRECTS_CONF:-/etc/nginx/zulip-include/app.d/chat-redirects.conf}"
+
+write_redirects() {
+    if [[ -z "${CHAT_REDIRECTS_B64:-}" ]]; then
+        rm -f "$REDIRECTS_CONF"
+        return 0
+    fi
+    mkdir -p "$(dirname "$REDIRECTS_CONF")"
+    local tmp
+    tmp="$(mktemp)"
+    if ! base64 -d <<<"$CHAT_REDIRECTS_B64" >"$tmp"; then
+        echo "chat-entrypoint: ERROR: CHAT_REDIRECTS_B64 is not valid base64; redirects disabled" >&2
+        rm -f "$tmp" "$REDIRECTS_CONF"
+        return 0
+    fi
+    # Only `location ... { return 302 https://...; }` lines and comments are allowed:
+    # this file is spliced into the public server block.
+    if grep -vE '^(#.*|location ~ \^/[A-Za-z0-9\\_-]+/\?\$ \{ return 302 https://[A-Za-z0-9.-]+/; \})?$' "$tmp" >/dev/null; then
+        echo "chat-entrypoint: ERROR: CHAT_REDIRECTS_B64 contains lines other than redirects; refusing it" >&2
+        rm -f "$tmp" "$REDIRECTS_CONF"
+        return 0
+    fi
+    install -m 0644 "$tmp" "$REDIRECTS_CONF"
+    rm -f "$tmp"
+    echo "chat-entrypoint: installed $(grep -c '^location' "$REDIRECTS_CONF" || true) redirect(s)"
+}
+
+[[ "${CHAT_ENTRYPOINT_TEST:-}" == 1 ]] && { write_redirects; exit 0; }
+
+case "${1:-app:run}" in
+    chat:manage)
+        shift
+        exec /usr/local/bin/chat-manage "$@"
+        ;;
+    *)
+        write_redirects
+        exec /sbin/entrypoint.sh "$@"
+        ;;
+esac

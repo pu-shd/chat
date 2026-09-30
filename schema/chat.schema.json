@@ -1,0 +1,454 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/pu-shd/chat/schema/chat.schema.json",
+  "title": "Department chat configuration (<dept>/chat.yml)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "department",
+    "azure",
+    "github",
+    "admin_email",
+    "email",
+    "servers"
+  ],
+  "$defs": {
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$"
+    },
+    "hostname": {
+      "type": "string",
+      "pattern": "^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
+    },
+    "email": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*\\.[A-Za-z]{2,}$"
+    },
+    "guid": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$"
+    },
+    "cidr4": {
+      "type": "string",
+      "pattern": "^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])/([0-9]|[12][0-9]|3[0-2])$"
+    },
+    "dns": {
+      "enum": [
+        "pending",
+        "live"
+      ]
+    },
+    "owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "email",
+        "name"
+      ],
+      "properties": {
+        "email": {
+          "$ref": "#/$defs/email"
+        },
+        "name": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "cert": {
+      "description": "TLS source for bound hostnames. Omit for ACA managed certificates.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key_vault_certificate"
+      ],
+      "properties": {
+        "key_vault_certificate": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9-]{1,127}$"
+        }
+      }
+    },
+    "entra": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "client_id": {
+          "$ref": "#/$defs/guid"
+        },
+        "allowed_group_id": {
+          "$ref": "#/$defs/guid"
+        },
+        "auto_signup": {
+          "type": "boolean"
+        }
+      }
+    },
+    "serverCommon": {
+      "type": "object",
+      "properties": {
+        "dns": {
+          "$ref": "#/$defs/dns"
+        },
+        "cpu": {
+          "description": "Total vCPU for the replica (Zulip + 3 sidecars). Memory is 2 GiB per vCPU (Consumption profile).",
+          "enum": [
+            2.0,
+            2.5,
+            3.0,
+            3.5,
+            4.0
+          ]
+        },
+        "ip_gate": {
+          "type": "boolean"
+        },
+        "easy_auth": {
+          "type": "boolean"
+        },
+        "push_notifications": {
+          "type": "boolean"
+        },
+        "cert": {
+          "$ref": "#/$defs/cert"
+        },
+        "entra": {
+          "$ref": "#/$defs/entra"
+        },
+        "data_quota_gib": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 102400
+        }
+      }
+    },
+    "text": {
+      "description": "Display text: no control characters, and it may not start with '-' or a bracket (it reaches command lines and Python settings).",
+      "type": "string",
+      "pattern": "^[^\\x00-\\x1f\\x7f\\-\\[({][^\\x00-\\x1f\\x7f]{0,99}$"
+    }
+  },
+  "properties": {
+    "department": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]{1,11}$"
+    },
+    "azure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tenant_id",
+        "subscription_id",
+        "region",
+        "prefix"
+      ],
+      "properties": {
+        "tenant_id": {
+          "$ref": "#/$defs/guid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/guid"
+        },
+        "region": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+$"
+        },
+        "prefix": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{1,14}[a-z0-9]$"
+        },
+        "vnet_cidr": {
+          "$ref": "#/$defs/cidr4"
+        },
+        "postgres_sku": {
+          "type": "string"
+        },
+        "names": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "resource_group": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._()-]{1,90}$"
+            },
+            "key_vault": {
+              "type": "string",
+              "pattern": "^[a-zA-Z][a-zA-Z0-9-]{1,22}[a-zA-Z0-9]$"
+            },
+            "storage": {
+              "type": "string",
+              "pattern": "^[a-z0-9]{3,24}$"
+            },
+            "postgres": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$"
+            }
+          }
+        }
+      }
+    },
+    "github": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repo",
+        "environment"
+      ],
+      "properties": {
+        "repo": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "environment": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        }
+      }
+    },
+    "admin_email": {
+      "$ref": "#/$defs/email"
+    },
+    "email": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "from"
+      ],
+      "properties": {
+        "provider": {
+          "enum": [
+            "resend",
+            "smtp"
+          ]
+        },
+        "from": {
+          "$ref": "#/$defs/email"
+        },
+        "from_name": {
+          "$ref": "#/$defs/text"
+        },
+        "host": {
+          "$ref": "#/$defs/hostname"
+        },
+        "port": {
+          "type": "integer",
+          "enum": [
+            465,
+            587,
+            2587
+          ]
+        },
+        "user": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._@+-]{1,100}$"
+        }
+      }
+    },
+    "defaults": {
+      "$ref": "#/$defs/serverCommon",
+      "unevaluatedProperties": false
+    },
+    "ip_gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "prefix_mode": {
+          "enum": [
+            "exact",
+            "slash24",
+            "vendor"
+          ]
+        },
+        "repo": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "campus_ranges": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/cidr4"
+          },
+          "minItems": 1
+        },
+        "extra_ranges": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/cidr4"
+          }
+        },
+        "fallback_url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^https://"
+        },
+        "snapshot": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_./-]+\\.json$"
+        },
+        "snapshot_max_age_days": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "redirects": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "host_server": {
+          "$ref": "#/$defs/slug"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "servers": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9-]{0,14}[a-z0-9]$"
+      },
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/$defs/serverCommon"
+              }
+            ],
+            "unevaluatedProperties": false,
+            "required": [
+              "kind",
+              "host",
+              "realm"
+            ],
+            "properties": {
+              "kind": {
+                "const": "dedicated"
+              },
+              "host": {
+                "$ref": "#/$defs/hostname"
+              },
+              "slug": {
+                "$ref": "#/$defs/slug",
+                "description": "Path alias on the redirect host (chat.<dept>/<slug>)"
+              },
+              "realm": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name",
+                  "owner"
+                ],
+                "properties": {
+                  "name": {
+                    "$ref": "#/$defs/text"
+                  },
+                  "owner": {
+                    "$ref": "#/$defs/owner"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/$defs/serverCommon"
+              }
+            ],
+            "unevaluatedProperties": false,
+            "required": [
+              "kind",
+              "external_host",
+              "realm_domain",
+              "realms"
+            ],
+            "properties": {
+              "kind": {
+                "const": "shared"
+              },
+              "external_host": {
+                "$ref": "#/$defs/hostname"
+              },
+              "realm_domain": {
+                "$ref": "#/$defs/hostname"
+              },
+              "preview_realm": {
+                "$ref": "#/$defs/slug"
+              },
+              "realms": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "slug",
+                    "name",
+                    "owner"
+                  ],
+                  "properties": {
+                    "slug": {
+                      "$ref": "#/$defs/slug"
+                    },
+                    "name": {
+                      "$ref": "#/$defs/text"
+                    },
+                    "owner": {
+                      "$ref": "#/$defs/owner"
+                    },
+                    "active": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "healthchecks": {
+      "description": "Optional Healthchecks.io (or self-hosted Healthchecks) monitoring. The project ping key lives in Key Vault as healthchecks-ping-key (and as the GitHub secret HEALTHCHECKS_PING_KEY for CI pings); an optional API key (healthchecks-api-key) lets healthchecks.zsh create and tune the checks.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "ping_base": {
+          "type": "string",
+          "pattern": "^https://[^/]+(/.*)?[^/]$"
+        },
+        "api_base": {
+          "type": "string",
+          "pattern": "^https://[^/]+(/.*)?[^/]$"
+        },
+        "health_interval_minutes": {
+          "enum": [
+            1,
+            2,
+            5,
+            10,
+            15,
+            30,
+            60
+          ]
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]+$"
+          }
+        }
+      }
+    }
+  }
+}
