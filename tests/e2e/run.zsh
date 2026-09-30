@@ -107,6 +107,16 @@ print -u2 -r -- "mgmt: $r2 (rerun)"
 jq -e '.created == false' <<<"$r2" >/dev/null || { print -u2 "rerun should find the realm, not create it"; exit 1; }
 r3="$(job send-test-email e2e-check@e2e.test)"
 print -u2 -r -- "mgmt: $r3"
+# Hand-over / recovery: create a second person as admin, then change their role.
+r4="$(job set-role _root helper@e2e.test admin 'E2E Helper')"
+print -u2 -r -- "mgmt: $r4"
+jq -e '.created == true and .role == "admin"' <<<"$r4" >/dev/null || { print -u2 "set-role should create an admin"; exit 1; }
+r5="$(job set-role _root helper@e2e.test moderator)"
+print -u2 -r -- "mgmt: $r5"
+jq -e '.created == false and .role == "moderator"' <<<"$r5" >/dev/null || { print -u2 "set-role should change the role"; exit 1; }
+if out="$("${compose[@]}" run --rm -T mgmt chat:manage set-role _root nobody@e2e.test owner 2>&1)"; then
+  print -u2 "set-role must refuse an unknown account without a full name"; exit 1
+fi
 
 # The -hc job: one healthy probe, and one against a path that fails (must ping /fail).
 "${compose[@]}" run --rm -T hcjob

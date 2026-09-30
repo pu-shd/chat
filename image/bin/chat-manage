@@ -10,6 +10,9 @@
 #   chat-manage ensure-realm <slug|_root> <name> <owner-email> <owner-full-name>
 #   chat-manage deactivate-realm <slug>
 #   chat-manage list-realms
+#   chat-manage set-role <slug|_root> <email> <owner|admin|moderator|member|guest> [full-name]
+#                                        # hand over or recover a realm; creates the
+#                                        # account (no password) when a full name is given
 #   chat-manage register-push            # push bouncer registration (Community plan)
 #   chat-manage send-test-email <to>     # prove outgoing mail (Resend) works
 #
@@ -58,6 +61,7 @@ realm = Realm.objects.filter(string_id=slug).first()
 if realm is not None:
     if realm.deactivated:
         print("CHAT-RESULT: " + json.dumps({"ok": False, "slug": slug, "error": "realm exists but is deactivated; reactivate it deliberately with manage.py reactivate_realm"}))
+        raise SystemExit(1)
     else:
         print("CHAT-RESULT: " + json.dumps({"ok": True, "slug": slug, "created": False, "url": realm.url}))
 else:
@@ -83,6 +87,37 @@ rows = [{"slug": r.string_id, "name": r.name, "deactivated": r.deactivated, "url
 print("CHAT-RESULT: " + json.dumps({"ok": True, "realms": rows}))
 '
         ;;
+    set-role)
+        [[ $# -ge 3 && $# -le 4 ]] || { result '{"ok": false, "error": "usage: set-role <slug|_root> <email> <role> [full-name]"}'; exit 2; }
+        [[ "$3" =~ ^(owner|admin|moderator|member|guest)$ ]] || { result '{"ok": false, "error": "role must be owner, admin, moderator, member or guest"}'; exit 2; }
+        init
+        slug="$1"; [[ "$slug" == "_root" ]] && slug=""
+        export CHAT_SLUG="$slug" CHAT_EMAIL="$2" CHAT_ROLE="$3" CHAT_FULL_NAME="${4:-}"
+        shell_py '
+import json, os
+from zerver.actions.create_user import do_create_user
+from zerver.actions.users import do_change_user_role
+from zerver.models import Realm, UserProfile
+from zerver.models.users import get_user_by_delivery_email
+ROLES = {"owner": UserProfile.ROLE_REALM_OWNER, "admin": UserProfile.ROLE_REALM_ADMINISTRATOR,
+         "moderator": UserProfile.ROLE_MODERATOR, "member": UserProfile.ROLE_MEMBER, "guest": UserProfile.ROLE_GUEST}
+slug, email, role, full = (os.environ[k] for k in ("CHAT_SLUG", "CHAT_EMAIL", "CHAT_ROLE", "CHAT_FULL_NAME"))
+realm = Realm.objects.get(string_id=slug)
+created = False
+try:
+    user = get_user_by_delivery_email(email, realm)
+except UserProfile.DoesNotExist:
+    if not full:
+        print("CHAT-RESULT: " + json.dumps({"ok": False, "error": f"no account {email} in this realm; pass a full name to create it"}))
+        raise SystemExit(1)
+    # No password: the person signs in with Entra (OIDC) using this email.
+    user = do_create_user(email, None, realm, full, role=ROLES[role], acting_user=None)
+    created = True
+if user.role != ROLES[role]:
+    do_change_user_role(user, ROLES[role], acting_user=None, notify=True)
+print("CHAT-RESULT: " + json.dumps({"ok": True, "email": email, "role": role, "created": created, "realm": realm.url}))
+'
+        ;;
     register-push)
         init
         su zulip -c "$MANAGE register_server --agree_to_terms_of_service"
@@ -95,7 +130,7 @@ print("CHAT-RESULT: " + json.dumps({"ok": True, "realms": rows}))
         result_kv sent_to "$1"
         ;;
     *)
-        echo "usage: chat-manage {ensure-realm|deactivate-realm|list-realms|register-push|send-test-email} ..." >&2
+        echo "usage: chat-manage {ensure-realm|deactivate-realm|list-realms|set-role|register-push|send-test-email} ..." >&2
         result '{"ok": false, "error": "unknown command"}'
         exit 2
         ;;

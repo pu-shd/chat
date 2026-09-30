@@ -5,6 +5,8 @@ import datetime as dt
 import json
 import subprocess
 
+import pytest
+
 from conftest import ROOT, az_basics
 from test_scripts import DOMAIN, IMAGE, deploy_rules
 
@@ -465,3 +467,39 @@ def run_in(root, run, script, *args):
     import os
     env = {"CHAT_ROOT": str(root)}
     return run(script, *args, env=env)
+
+
+# ---------------------------------------------------------------- realm.zsh --set-role
+
+
+def role_rules(sh, result):
+    az_basics(sh)
+    sh.on("az", r"^containerapp job start --name orfe-chat-dept-mgmt ", "exec-role")
+    sh.on("az", r"^containerapp job execution show ", "Succeeded")
+    sh.on("az", r"^containerapp job logs show ", "CHAT-RESULT: " + json.dumps(result))
+
+
+def test_set_role_owner_needs_typed_confirmation(run, dept, shims):
+    role_rules(shims, {"ok": True, "email": "new@example.edu", "role": "owner", "created": True})
+    r = run("realm.zsh", "--config", str(dept.path), "--server", "dept", "--set-role", "_root", "new@example.edu", "owner", "New Owner")
+    assert r.returncode != 0 and "GRANT owner new@example.edu" in r.stderr
+    assert not any("job start" in c for c in shims.joined("az"))
+    r = run("realm.zsh", "--config", str(dept.path), "--server", "dept", "--set-role", "_root", "new@example.edu", "owner",
+            "New Owner", env={"CHAT_CONFIRM": "GRANT owner new@example.edu"})
+    assert r.returncode == 0, r.stderr
+    start = next(c for c in shims.joined("az") if "job start" in c)
+    assert "--args chat:manage set-role _root new@example.edu owner New Owner" in start
+
+
+def test_set_role_moderator_needs_no_confirmation_and_checks_the_result(run, dept, shims):
+    role_rules(shims, {"ok": True, "email": "someone-else@example.edu", "role": "moderator", "created": False})
+    r = run("realm.zsh", "--config", str(dept.path), "--server", "dept", "--set-role", "_root", "m@example.edu", "moderator")
+    assert r.returncode != 0 and "does not satisfy" in r.stderr  # the job answered about someone else
+
+
+@pytest.mark.parametrize("email, role", [("not-an-email", "member"), ("a@example.edu", "superuser")])
+def test_set_role_rejects_bad_input(run, dept, shims, email, role):
+    az_basics(shims)
+    r = run("realm.zsh", "--config", str(dept.path), "--server", "dept", "--set-role", "_root", email, role)
+    assert r.returncode != 0
+    assert not any("job start" in c for c in shims.joined("az"))

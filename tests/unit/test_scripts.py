@@ -432,13 +432,13 @@ def test_bootstrap_rejects_unknown_step(run, dept):
 
 def test_bootstrap_dns_step_writes_ticket_with_redirect_host_last(run, dept, shims, tmp_path):
     bind_rules(shims)
-    r = run("bootstrap.zsh", "--config", str(dept.path), "--only", "dns", env={"CHAT_OUT_DIR": str(tmp_path)})
+    r = run("bootstrap.zsh", "--config", str(dept.path), "--only", "dns",
+            env={"CHAT_OUT_DIR": str(tmp_path), "CHAT_STATE_DIR": str(tmp_path / "state")})
     assert r.returncode == 0, r.stderr
     ticket = (tmp_path / "dns-request-orfe.md").read_text()
     order = [ticket.index(f"DNS request: {s} ") for s in ("groups", "lab", "dept")]
     assert order == sorted(order)
     assert f"| CNAME | `chat.orfe.example.edu` | `orfe-chat-dept.{DOMAIN}` | 3600 |" in ticket
-    assert f"orfe-chat-dept.{DOMAIN}/" in r.stderr  # "reachable now" table
 
 
 # ---------------------------------------------------------------- image entrypoint
@@ -513,3 +513,74 @@ def test_unbuilt_image_stops_the_deploy(run, dept, shims, tmp_path):
     deploy_rules(shims)
     r = run("deploy-server.zsh", "--config", str(dept.path), "--server", "dept", "--lock", str(lock))
     assert r.returncode != 0 and "chat:v0.3.0-abcdef1 is not built yet" in r.stderr
+
+
+# ---------------------------------------------------------------- bootstrap state and resume
+
+
+def template_sha():
+    return subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip() or "unknown"
+
+
+def state(tmp_path):
+    f = tmp_path / "state" / "orfe.state"
+    return json.loads(f.read_text()) if f.exists() else {}
+
+
+def test_bootstrap_records_each_step(run, dept, shims, tmp_path):
+    bind_rules(shims)
+    r = run("bootstrap.zsh", "--config", str(dept.path), "--only", "dns",
+            env={"CHAT_OUT_DIR": str(tmp_path), "CHAT_STATE_DIR": str(tmp_path / "state")})
+    assert r.returncode == 0, r.stderr
+    st = state(tmp_path)
+    assert st["dns"]["status"] == "done" and st["dns"]["template"] == template_sha()
+    assert "▶ [1/1] dns" in r.stderr and "✓ dns" in r.stderr and "Summary" in r.stderr
+
+
+def test_bootstrap_failure_is_recorded_with_a_resume_hint(run, dept, shims, tmp_path):
+    az_basics(shims)
+    shims.on("az", r"^containerapp env show .*defaultDomain", DOMAIN)
+    shims.on("curl", r".", exit=22)
+    r = run("bootstrap.zsh", "--config", str(dept.path), "--only", "smoke",
+            env={"CHAT_STATE_DIR": str(tmp_path / "state")})
+    assert r.returncode == 1
+    assert state(tmp_path)["smoke"]["status"] == "failed"
+    assert "✗ smoke failed" in r.stderr and "Stopped at smoke" in r.stderr and "--resume" in r.stderr
+
+
+def test_bootstrap_resume_skips_what_is_done(run, dept, shims, tmp_path):
+    (tmp_path / "state").mkdir()
+    done = {s: {"status": "done", "seconds": 1, "template": template_sha(), "at": "2026-09-30T00:00:00Z"}
+            for s in ["prereqs", "platform", "image", "github", "secrets", "entra", "access", "servers",
+                      "healthchecks", "smoke"]}
+    (tmp_path / "state" / "orfe.state").write_text(json.dumps(done))
+    bind_rules(shims)
+    r = run("bootstrap.zsh", "--config", str(dept.path), "--resume",
+            env={"CHAT_OUT_DIR": str(tmp_path), "CHAT_STATE_DIR": str(tmp_path / "state")})
+    assert r.returncode == 0, r.stderr
+    assert "▶ [1/1] dns" in r.stderr  # only the unfinished step ran
+    assert state(tmp_path)["dns"]["status"] == "done"
+    r = run("bootstrap.zsh", "--config", str(dept.path), "--resume", env={"CHAT_STATE_DIR": str(tmp_path / "state")})
+    assert r.returncode == 0 and "every step is done" in r.stderr
+
+
+def test_bootstrap_treats_steps_from_another_template_commit_as_stale(run, dept, shims, tmp_path):
+    (tmp_path / "state").mkdir()
+    old = {s: {"status": "done", "seconds": 1, "template": "0" * 40, "at": "x"}
+           for s in ["prereqs", "platform", "image", "github", "secrets", "entra", "access", "servers",
+                     "healthchecks", "smoke", "dns"]}
+    (tmp_path / "state" / "orfe.state").write_text(json.dumps(old))
+    az_basics(shims)
+    r = run("bootstrap.zsh", "--config", str(dept.path), "--resume", env={"CHAT_STATE_DIR": str(tmp_path / "state")})
+    assert "↻" in r.stderr and "stale" in r.stderr
+    assert "▶ [1/11] prereqs" in r.stderr  # resumes from the first stale step
+
+
+def test_bootstrap_restart_forgets_progress(run, dept, shims, tmp_path):
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "orfe.state").write_text(json.dumps({"dns": {"status": "done", "template": template_sha()}}))
+    bind_rules(shims)
+    r = run("bootstrap.zsh", "--config", str(dept.path), "--restart", "--only", "dns",
+            env={"CHAT_OUT_DIR": str(tmp_path), "CHAT_STATE_DIR": str(tmp_path / "state")})
+    assert r.returncode == 0, r.stderr
+    assert "Progress so far" not in r.stderr and list(state(tmp_path)) == ["dns"]

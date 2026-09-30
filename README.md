@@ -95,7 +95,17 @@ git clone https://github.com/pu-shd/chat.git .chat-template && git -C .chat-temp
 .chat-template/scripts/bootstrap.zsh --config orfe --set-gh-vars
 ```
 
-`bootstrap.zsh` runs these steps; each is idempotent, and `--from <step>` resumes after a fix:
+`bootstrap.zsh` is colourful, interactive on a terminal, and resumable. It shows a banner (department, template commit, state file) and numbered steps with timings, and ends with a summary.
+- **State:** every step's outcome goes to `.chat-bootstrap/<dept>.state` in the config repo (gitignored).
+- **Resuming on a terminal:** a rerun shows the checklist (✓ done, ✗ failed, ↻ stale, · pending) and offers to resume at the first unfinished step, start over, or pick a step.
+- **Failures:** an interactive run offers retry, skip or quit. A non-interactive run stops and prints the `--resume` command.
+- **Flags:**
+  - `--resume` skips finished steps; `--restart` forgets them.
+  - `--from STEP` / `--only STEP` pick steps; `--step-by-step` asks before each one.
+- **Stale steps:** a step finished with a different template commit shows as stale and runs again.
+- **Safety:** every step is idempotent, so rerunning is always safe.
+
+The steps:
 
 | Step | Script | What it does |
 |---|---|---|
@@ -174,6 +184,43 @@ Each hostname needs two records. The values come from the platform, so the ticke
   - The department server's `/<slug>` redirect follows automatically.
 
 Realms are deactivated, never deleted: `realm.zsh --deactivate <slug>`, with type-to-confirm.
+
+## Accounts and roles
+
+**Sign-in is Entra-only; there are no local accounts.**
+- `ZULIP_AUTH_BACKENDS` is only `GenericOpenIdConnectBackend`, so:
+  - there is no password login, no password reset and no `fetch_api_key` with a password;
+  - the login page shows only "Log in with Princeton (Microsoft Entra ID)". The e2e suite asserts that password login is off.
+- The mobile and desktop apps sign in through the same Entra flow and then hold a per-user API key. Bots use API keys that their owners create in Zulip.
+
+**Who can sign in at all** is decided in Entra, not in Zulip:
+- Each server's app registration requires user assignment. Only users or groups assigned to it (`entra-app.zsh --group <object-id>`, or `entra.allowed_group_id`) get past Entra.
+- A new deployment with nobody assigned lets nobody in; `entra-app.zsh` warns about exactly that.
+
+**The first owner, on first deploy.** For each realm, `chat.yml` names an `owner` (email and name).
+- The deploy's `-mgmt` job creates the realm with that person as **Organization owner**, Zulip's highest in-app role, with **no password**.
+- The first time that person signs in with Entra, Zulip matches the Entra `email` claim to the account (case-insensitive) and they have full rights at once. Use the address Entra actually sends (the user's primary mail), not an alias, or Zulip treats them as a new person.
+- The owner is the first person who can:
+  - invite people, where needed (on shared servers, sign-up is invitation-only);
+  - promote others to administrator or moderator;
+  - set the realm's name, logo and icon, and its policies.
+
+**Everyone else:**
+- **Dedicated server:** anyone assigned in Entra can create an account on first sign-in (`auto_signup: true`, the default there), as a plain Member.
+- **Shared server:** accounts come only from invitations (`auto_signup` defaults to false), because one Entra app admits its users to every realm on that server.
+
+**There is no web "super admin".**
+- Zulip's server-level administration is the command line (`manage.py`). Here that is the `-mgmt` job, which only operators with Azure rights can run.
+- `admin_email` (`ZULIP_ADMINISTRATOR`) is just the address for server error mail and the support contact shown to users. It is not an account.
+
+**Hand-over and recovery** (the owner has left, or never signed in):
+- Use `realm.zsh --config <dept> --server <name> --set-role <slug|_root> <email> <role> [full name]` locally, or the **Operate** workflow's `realm-set-role` action for an existing account.
+  - It sets anyone's role (owner, admin, moderator, member, guest).
+  - Given a full name, it creates the account first (no password; they sign in with Entra).
+  - Granting owner or admin asks for typed confirmation, and in CI runs in the reviewer-gated admin environment.
+- Changing a realm's `owner` in `chat.yml` does **not** demote the old owner. `ensure-realm` only creates missing realms; roles in an existing realm change through Zulip or `set-role`.
+
+**If Entra is unavailable**, nobody can start a new session. Existing web sessions and mobile/desktop API keys keep working until they expire or are revoked.
 
 ## Security model
 
@@ -337,12 +384,17 @@ The single-server scripts (`teardown-server.zsh`, `teardown-platform.zsh`) remai
 | Upgrade Zulip | Merge the template's update PR (it bumps `ZULIP_IMAGE`), tag a release, merge the config repo's update PR. Its deploy builds the new image into the registry, stops the old revision so only one Zulip migrates, and records a PostgreSQL restore point |
 | Refresh IP gate (gated servers) | Daily `ip-gate.yml`, or `ip-gate.zsh --apply` |
 | Check mail | `realm.zsh --send-test-email you@princeton.edu` |
+| Hand a realm over / recover it | `realm.zsh --set-role <slug\|_root> <email> owner "Full Name"` (see Accounts and roles) |
 | Mobile push | Apply for Zulip's free Community plan for each organization, then `realm.zsh --register-push` and set `push_notifications: true` |
 | Rotate the Entra secret | `entra-app.zsh --rotate-secret`, then `update-server.zsh --restart`, then `entra-app.zsh --prune-old-secrets`; until then the old secret still works |
 | Rotate the ACS SMTP secret | `acs-email.zsh --rotate-secret`, restart the servers, then `acs-email.zsh --prune-old-secrets` |
 | Rebuild the image | `build-image.zsh --config <dept>`: a no-op when `chat:<ref>-<sha7>` already exists; a new release gets a new tag |
 | Health right now | `keepalive.zsh --config <dept>`; with Healthchecks, `healthchecks.zsh --list` |
 | Remove servers or everything | `teardown.zsh`, or the Teardown workflow (see Teardown above) |
+
+## Custom look
+
+It is possible to give some instances a custom look (e.g. Princeton/ORFE styling from paper-tiger) and leave others on Zulip's default. It is not built yet; [docs/theming.md](docs/theming.md) has the findings, a verified proof of concept, and the plan.
 
 ## Tests
 
