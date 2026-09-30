@@ -58,7 +58,7 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq zsh jq
           zsh .chat-template/scripts/setup-venv.zsh
-      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.10.1
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v3.10.1
       - uses: azure/login@v3
         with:
           client-id: ${{ inputs.azure_client_id }}
