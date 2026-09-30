@@ -1,59 +1,64 @@
 # Custom look for Zulip instances
 
-**Can instances get a custom design on the existing infrastructure — e.g. paper-tiger styling for some, Zulip's default for others?**
-Yes, with two complementary layers. Neither is built yet; this is the finding and the plan.
+Instances can have a custom look (e.g. Princeton / ORFE styling) while others keep Zulip's default. There are two layers.
 
-## What Zulip supports natively (per realm, no infrastructure change)
+## 1. Zulip's own branding (per realm, set in Zulip)
 
 An organization owner sets these in Zulip (Settings → Organization → Profile):
 - **name and description**;
 - **icon**, and a **logo** in light and dark variants;
 - the **default theme** (light/dark/automatic) for new users.
 
-They are per realm, so on a shared server each group can have its own. They survive upgrades because they are product features.
+They are per realm, so on a shared server each group can differ. They are product features, so they survive upgrades, and they also show in the mobile apps.
 
-For paper-tiger, that means the ORFE logo (`assets/logos/orfe-logo.png`), the Princeton shield as icon, and the realm name. It could be scripted through the `-mgmt` job (a `chat-manage set-branding` command uploading those files), or done once by hand.
+Logos are deliberately **not** shipped in this public repo: Princeton marks are trademarks, and the design kit they come from is private. Upload them per realm.
 
-Server-wide there are also:
-- `INSTALLATION_NAME` (shown in email and on the login page);
-- `CUSTOM_LOGO_URL`;
-- custom policy pages (`POLICIES_DIRECTORY`) and a terms-of-service gate.
+## 2. Colour themes (`theme:` in `chat.yml`)
 
-## What needs our layer: colours and type
+```yaml
+servers:
+  dept:
+    kind: dedicated
+    host: chat.orfe.princeton.edu
+    theme: paper-tiger            # this server's realm
+  groups:
+    kind: shared
+    theme: paper-tiger            # every realm on it…
+    realms:
+      - {slug: ahmadi-group, …}
+      - {slug: beta-lab, …, theme: default}   # …except this one: Zulip's own look
+```
 
-Zulip has no supported custom-CSS setting. Its web app, however, is styled through CSS custom properties, so overriding tokens re-skins it without touching its markup. Examples:
-- `--color-background`, `--color-text-default` and `--color-link`;
-- `--color-outline-focus` and `--color-background-zulip-button`;
-- about 470 `--color-*` properties in 12.3.
+Themes ship in the image under `image/themes/<name>/theme.css`. Available now:
 
-**Verified against Zulip 12.3 in the e2e stack (2026-09-30):**
-- Zulip sends **no Content-Security-Policy** on its pages, so a same-origin stylesheet is allowed.
-- HTML comes from Django **uncompressed**, and nginx has `ngx_http_sub_module`. A server-level `sub_filter` in the `app.d` include (the one the `/<slug>` redirects already use) injected `<link rel="stylesheet" href="/chat-theme/…css">` into `/login/`, `/accounts/login/` and `/`.
-- The stylesheet itself is served from `/home/zulip/local-static/` (Zulip's own `/local-static` path, or an `app.d` location).
-- Dark mode is Zulip's `.dark-theme` / `.color-scheme-automatic` classes, with the values written as `light-dark(...)`. A theme must give dark values too. paper-tiger has none, so they would be derived (e.g. brand orange `#e77500` with darker neutrals).
+| Theme | Look |
+|---|---|
+| `paper-tiger` | Princeton orange from the ORFE "Paper Tiger" kit (accent `#e77500`, ink `#333`), with light and dark values |
 
-## The plan
+**What the theme recolours:** primary/secondary buttons, banners, links, the focus ring, mentions of you, input pills, sidebar hover, the unread marker, an orange rule under the navbar, and the login/sign-up pages' buttons, links and footer. Everything else stays Zulip.
 
-1. **Themes live in the template image:** `image/themes/<name>/theme.css`, plus self-hosted fonts and logos. `paper-tiger` would map its tokens onto Zulip's variables:
-   - `--siempre-accent` → Zulip's accent, link and focus colours;
-   - its neutrals → backgrounds and text;
-   - Source Sans 3 / Source Serif 4 (Google Fonts, or self-hosted).
+**How it works:**
+- `render.py` validates the theme names against the image and turns them into `host=theme` pairs. The pairs cover each realm's live hostname, plus the pre-DNS `*.azurecontainerapps.io` name for the realm that answers there.
+- The image's entrypoint turns the pairs into an nginx `map $host` plus a `sub_filter` that adds one same-origin `<link rel="stylesheet" href="/chat-theme/<name>/theme.css?v=<hash>">` before `</head>`.
+  - Zulip sends no Content-Security-Policy, and its HTML is not compressed upstream, so this is all it takes.
+  - The stylesheet is served with Zulip's own security headers.
+  - Malformed pairs, or a theme that isn't in the image, switch themes off with a log line; they never break nginx.
+- A theme overrides **only Zulip's CSS custom properties**, never its markup. Zulip's web app and its login pages are driven by about 640 `--color-*` variables, and Zulip sets `color-scheme: dark` in dark mode, so `light-dark(<light>, <dark>)` values follow each user's choice.
 
-   Adobe's `sofia-pro` would need the chat hostnames added to the Typekit kit's allowed domains; otherwise the Source fallbacks apply.
-2. **Selection in `chat.yml`:**
-   - `theme: paper-tiger` on a server applies to all its realms;
-   - `themes: {<slug>: paper-tiger}` on a shared server applies per realm;
-   - absent means Zulip's default.
+**Safety against Zulip upgrades:**
+- A renamed variable just falls back to Zulip's default.
+- The e2e suite checks, against the running Zulip, that **every variable a theme sets still exists** in its CSS bundles. It also checks that themed pages (login, and the signed-in app) link the stylesheet, and that it is served.
+- Unit tests enforce the theme rules:
+  - `:root` / `::selection` rules only;
+  - no `url()` or `@import` (no third-party requests);
+  - dark values present.
 
-   `render.py` passes a validated `host → theme` map. `chat-entrypoint` writes an http-level `map $host $chat_theme {…}` and the server-level `sub_filter` that links `/chat-theme/$chat_theme.css`, only for hosts with a theme. It builds these from names it checks against the themes baked into the image, never from text, like the rate limits.
-3. **Tests:**
-   - a unit test for the generated nginx config;
-   - an e2e assertion that a themed host's page links the stylesheet, an unthemed host's page doesn't, and the CSS is served;
-   - a screenshot check (Playwright) of the login page and the app, so a Zulip upgrade that renames variables shows up in CI rather than in production.
+## Adding a theme
 
-## Trade-offs
+Copy `image/themes/paper-tiger/` to a new name and change the `--pt-*` palette at the top. Then release the template; config repos select it with `theme: <name>`. The rules are in `image/themes/README.md`.
 
-- **Upgrades:** the variable names are Zulip internals, not an API. Themes should override only the token layer (variables), never structural selectors, so a Zulip upgrade degrades gracefully: unmatched variables simply fall back to Zulip's defaults. The screenshot check catches drift.
-- **Mobile apps:** Zulip's iOS/Android apps are native and ignore web CSS. They show the realm's icon and name, which come from the native layer above.
-- **Emails** use Zulip's own templates; only `INSTALLATION_NAME` and the realm name/logo carry over.
-- **What not to take from paper-tiger:** its component classes (`.pt-*`), and its global element rules (the orange `h2::after` bar, forced `box-sizing`, serif body text), which would fight Zulip's layout. Take the tokens and the logos only.
+## What does not change
+
+- **The iOS/Android apps** are native: they show the realm icon and name (layer 1), not the colours.
+- **Emails** use Zulip's templates.
+- **Fonts:** themes load none. Zulip already ships Source Sans 3, Paper Tiger's own fallback. Adobe's sofia-pro is licensed only for `*.princeton.edu`, and would add a third-party request on every page.

@@ -16,7 +16,9 @@ LABEL org.opencontainers.image.source="https://github.com/pu-shd/chat" \
       org.opencontainers.image.licenses="MIT"
 
 COPY bin/ /usr/local/bin/
-RUN chmod 0755 /usr/local/bin/chat-*
+# Themes a chat.yml can select; served at /chat-theme/<name>/ (see chat-entrypoint).
+COPY themes/ /usr/local/share/chat-themes/
+RUN chmod 0755 /usr/local/bin/chat-* && rm -f /usr/local/share/chat-themes/README.md
 
 ENTRYPOINT ["/usr/local/bin/chat-entrypoint"]
 CMD ["app:run"]

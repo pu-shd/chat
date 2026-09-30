@@ -505,3 +505,34 @@ def test_rate_limits_configurable_and_can_be_turned_off(dept, capsys):
 def test_rate_limits_schema(dept, capsys):
     dept.edit(lambda c: c.update(rate_limits={"api_per_second": 0}))
     assert "schema validation failed" in rerender_error(dept, capsys)
+
+
+# ---------------------------------------------------------------- themes
+
+
+def test_theme_on_a_dedicated_server_covers_live_and_preview_hosts(dept, capsys):
+    dept.edit(lambda c: c["servers"]["dept"].update(theme="paper-tiger"))
+    dept.render()
+    env = resolve(dept, "dept", capsys)["_env"]
+    assert env["CHAT_THEMES"].split() == ["chat.orfe.example.edu=paper-tiger", f"orfe-chat-dept.{DOMAIN}=paper-tiger"]
+    assert "CHAT_THEMES" not in resolve(dept, "lab", capsys, "--ip-rules", '[{"name":"x"}]',
+                                        "--oidc-client-id", "33333333-3333-3333-3333-333333333333")["_env"]
+
+
+def test_realm_themes_on_a_shared_server(dept, capsys):
+    def cfg(c):
+        c["servers"]["groups"]["theme"] = "paper-tiger"
+        c["servers"]["groups"]["realms"][1]["theme"] = "default"   # beta-lab keeps Zulip's look
+    dept.edit(cfg)
+    dept.render()
+    pairs = resolve(dept, "groups", capsys)["_env"]["CHAT_THEMES"].split()
+    assert "ahmadi-group.chat.orfe.example.edu=paper-tiger" in pairs
+    assert f"orfe-chat-groups.{DOMAIN}=paper-tiger" in pairs      # ahmadi-group is the preview realm
+    assert "groups.chat.orfe.example.edu=paper-tiger" in pairs
+    assert not any(p.startswith("beta-lab.") for p in pairs)
+
+
+def test_unknown_theme_is_an_error(dept, capsys):
+    dept.edit(lambda c: c["servers"]["dept"].update(theme="neon"))
+    err = rerender_error(dept, capsys)
+    assert "theme 'neon' is not in this template" in err and "paper-tiger" in err

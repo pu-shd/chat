@@ -60,7 +60,8 @@ def _plain(url: str) -> str:
     return url
 
 
-def test_entra_oidc_sign_in_round_trip():
+def signed_in_session():
+    """Sign in through the mock Entra, following redirects by hand (the network is plain HTTP)."""
     s = requests.Session()
     url = BASE + "/accounts/login/social/oidc/entra"
     seen = []
@@ -73,6 +74,11 @@ def test_entra_oidc_sign_in_round_trip():
             break
         url = _plain(requests.compat.urljoin(url, r.headers["Location"]))
     assert any("oidc:8080/entra/authorize" in u for _, u in seen), seen
+    return s, seen
+
+
+def test_entra_oidc_sign_in_round_trip():
+    s, seen = signed_in_session()
     me = s.get(BASE + "/json/users/me", headers=XFP, timeout=30)
     assert me.status_code == 200, (seen, me.text[:300])
     # "email" is Zulip's privacy-preserving address; the real one is delivery_email.
@@ -122,3 +128,21 @@ def test_exempt_range_is_never_limited():
 
 def test_static_and_health_are_not_limited():
     assert 429 not in burst("/health", "198.51.100.7", 10)
+
+
+def test_theme_is_injected_and_served():
+    page = get("/login/", allow_redirects=True).text
+    m = re.search(r'<link rel="stylesheet" href="(/chat-theme/paper-tiger/theme\.css\?v=[0-9a-f]{12})"></head>', page)
+    assert m, "themed host should link the theme stylesheet just before </head>"
+    css = get(m.group(1))
+    assert css.status_code == 200 and css.headers["Content-Type"].startswith("text/css")
+    assert css.headers.get("X-Frame-Options") == "DENY"  # Zulip's own security headers kept
+    assert "--color-background-brand-solid-action-button" in css.text
+
+
+def test_signed_in_app_is_themed_too():
+    s, _ = signed_in_session()
+    for c in s.cookies:
+        c.secure = False
+    app = s.get(BASE + "/", headers=XFP, timeout=30).text
+    assert re.search(r'<link rel="stylesheet" href="/chat-theme/paper-tiger/theme\.css\?v=[0-9a-f]{12}"></head>', app)

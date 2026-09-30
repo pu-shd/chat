@@ -1,0 +1,89 @@
+/*
+ * pu-shd/chat theme "paper-tiger": Princeton orange for Zulip, after the ORFE
+ * "Paper Tiger" design kit (Siempre accent #e77500, neutral ink #333).
+ *
+ * Tokens only. This file overrides Zulip's own CSS custom properties (its "brand"
+ * accent family, links, focus, mentions, pills, sidebar hover, unread marker, navbar
+ * rule) and never styles Zulip's markup, so a Zulip upgrade degrades gracefully:
+ * a renamed variable simply falls back to Zulip's default. tests/e2e checks that
+ * every variable set here still exists in the running Zulip.
+ *
+ * Light and dark: Zulip sets `color-scheme: dark` on :root in dark mode, so
+ * light-dark(<light>, <dark>) follows the user's theme choice.
+ * Fonts: none loaded. Zulip already ships Source Sans 3, Paper Tiger's own fallback.
+ * Logos are per realm (Zulip: Organization settings → Profile), not part of this file.
+ */
+:root {
+  --pt-accent: #e77500;
+  --pt-accent-dark: #c1560e;
+  --pt-accent-darker: #a34709;
+  --pt-accent-deep: #8a3c07;
+  --pt-accent-ink: #6d2e03;
+  --pt-accent-light: #f7964a;
+  --pt-accent-lighter: #feecde;
+  --pt-accent-lightest: #fff7f2;
+  --pt-accent-pale: #fbc195;
+  --pt-focus: #3b99fc;
+
+  /* Solid brand buttons: white on dark orange (4.6:1) / near-black on light orange. */
+  --color-background-brand-solid-action-button: light-dark(var(--pt-accent-dark), var(--pt-accent-light));
+  --color-background-brand-solid-action-button-hover: light-dark(var(--pt-accent-darker), #f9a86a);
+  --color-background-brand-solid-action-button-active: light-dark(var(--pt-accent-deep), var(--pt-accent));
+  --color-text-brand-solid-action-button: light-dark(#ffffff, #1d1d1d);
+
+  /* Subtle and text-only brand buttons, brand icon buttons. */
+  --color-background-brand-subtle-action-button: color-mix(in oklch, light-dark(var(--pt-accent), var(--pt-accent-light)) 12%, transparent);
+  --color-background-brand-subtle-action-button-hover: color-mix(in oklch, light-dark(var(--pt-accent), var(--pt-accent-light)) 17%, transparent);
+  --color-background-brand-subtle-action-button-active: color-mix(in oklch, light-dark(var(--pt-accent), var(--pt-accent-light)) 22%, transparent);
+  --color-text-brand-subtle-action-button: light-dark(var(--pt-accent-deep), var(--pt-accent-pale));
+  --color-text-brand-text-action-button: light-dark(var(--pt-accent-dark), var(--pt-accent-light));
+  --color-background-brand-text-action-button-hover: color-mix(in oklch, light-dark(var(--pt-accent), var(--pt-accent-light)) 8%, transparent);
+  --color-background-brand-text-action-button-active: color-mix(in oklch, light-dark(var(--pt-accent), var(--pt-accent-light)) 14%, transparent);
+  --color-text-brand-icon-button: color-mix(in oklch, light-dark(var(--pt-accent-dark), var(--pt-accent-light)) 75%, transparent);
+  --color-text-brand-icon-button-hover: light-dark(var(--pt-accent-dark), var(--pt-accent-light));
+  --color-text-brand-icon-button-active: color-mix(in oklch, light-dark(var(--pt-accent-dark), var(--pt-accent-light)) 75%, transparent);
+  --color-text-brand-icon-button-square-active: light-dark(var(--pt-accent-dark), var(--pt-accent-light));
+  --color-background-brand-icon-button-square-hover: color-mix(in oklch, light-dark(var(--pt-accent), var(--pt-accent-light)) 8%, transparent);
+  --color-background-brand-icon-button-square-active: color-mix(in oklch, light-dark(var(--pt-accent), var(--pt-accent-light)) 14%, transparent);
+
+  /* Brand banners. */
+  --color-background-brand-banner: light-dark(var(--pt-accent-lightest), color-mix(in oklch, var(--pt-accent) 16%, #121212));
+  --color-border-brand-banner: color-mix(in oklch, light-dark(var(--pt-accent), var(--pt-accent-light)) 40%, transparent);
+  --color-text-brand-banner: light-dark(var(--pt-accent-ink), var(--pt-accent-pale));
+
+  /* Links and keyboard focus (Paper Tiger's focus ring). */
+  --color-text-link: light-dark(var(--pt-accent-dark), var(--pt-accent-light));
+  --color-link: light-dark(var(--pt-accent-dark), var(--pt-accent-light));
+  --color-outline-focus: var(--pt-focus);
+
+  /* Mentions of you, and user/channel pills in inputs. */
+  --color-background-direct-mention: light-dark(var(--pt-accent-lightest), color-mix(in oklch, var(--pt-accent) 12%, #1d1d1d));
+  --color-background-text-direct-mention: color-mix(in oklch, light-dark(var(--pt-accent), var(--pt-accent-light)) 22%, transparent);
+  --color-background-text-hover-direct-mention: color-mix(in oklch, light-dark(var(--pt-accent), var(--pt-accent-light)) 34%, transparent);
+  --color-text-self-direct-mention: light-dark(var(--pt-accent-ink), var(--pt-accent-pale));
+  --color-background-input-pill: light-dark(var(--pt-accent-lighter), color-mix(in oklch, var(--pt-accent-light) 30%, transparent));
+  --color-background-input-pill-search: light-dark(var(--pt-accent-lighter), color-mix(in oklch, var(--pt-accent-light) 24%, transparent));
+  --color-background-input-pill-hover: color-mix(in oklch, light-dark(var(--pt-accent), var(--pt-accent-light)) 30%, transparent);
+  --color-input-pill-close: light-dark(var(--pt-accent-dark), var(--pt-accent-pale));
+
+  /* Login, sign-up and welcome pages ("portico"): their own button, link and footer
+     colours. The footer takes Paper Tiger's #333 band. */
+  --color-action-button: var(--pt-accent-dark);
+  --color-action-button-hover: var(--pt-accent-darker);
+  --color-action-button-active: var(--pt-accent-deep);
+  --color-action-button-subtle-hover: var(--pt-accent-lightest);
+  --color-action-button-subtle-active: var(--pt-accent-lighter);
+  --color-link-portico-auth: var(--pt-accent-dark);
+  --color-link-portico-auth-hover: var(--pt-accent-deep);
+  --color-footer-background: #333333;
+
+  /* Sidebar hover, unread marker, and the orange rule under the navbar. */
+  --color-background-sidebar-action-hover: light-dark(var(--pt-accent-lighter), color-mix(in oklch, var(--pt-accent) 20%, transparent));
+  --color-text-sidebar-action-heading-hover: light-dark(var(--pt-accent-ink), var(--pt-accent-pale));
+  --color-unread-marker: light-dark(var(--pt-accent), var(--pt-accent-light));
+  --color-navbar-bottom-border: light-dark(var(--pt-accent), var(--pt-accent-dark));
+}
+
+::selection {
+  background-color: light-dark(var(--pt-accent-lighter), color-mix(in oklch, var(--pt-accent) 35%, transparent));
+}

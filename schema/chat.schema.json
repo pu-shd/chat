@@ -119,6 +119,9 @@
           "type": "integer",
           "minimum": 100,
           "maximum": 102400
+        },
+        "theme": {
+          "$ref": "#/$defs/theme"
         }
       }
     },
@@ -126,6 +129,11 @@
       "description": "Display text: no control characters, and it may not start with '-' or a bracket (it reaches command lines and Python settings).",
       "type": "string",
       "pattern": "^[^\\x00-\\x1f\\x7f\\-\\[({][^\\x00-\\x1f\\x7f]{0,99}$"
+    },
+    "theme": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,39}$",
+      "description": "A theme from pu-shd/chat image/themes/ (e.g. paper-tiger), or 'default' for Zulip's own look."
     }
   },
   "properties": {
@@ -457,6 +465,9 @@
                     },
                     "active": {
                       "type": "boolean"
+                    },
+                    "theme": {
+                      "$ref": "#/$defs/theme"
                     }
                   }
                 }

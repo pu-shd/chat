@@ -584,3 +584,55 @@ def test_bootstrap_restart_forgets_progress(run, dept, shims, tmp_path):
             env={"CHAT_OUT_DIR": str(tmp_path), "CHAT_STATE_DIR": str(tmp_path / "state")})
     assert r.returncode == 0, r.stderr
     assert "Progress so far" not in r.stderr and list(state(tmp_path)) == ["dns"]
+
+
+# ---------------------------------------------------------------- themes (entrypoint)
+
+
+def themes(tmp_path, value, themes_dir=None):
+    th, ts = tmp_path / "conf.d" / "chat-themes.conf", tmp_path / "app.d" / "chat-themes.conf"
+    env = {**os.environ, "CHAT_ENTRYPOINT_TEST": "1", "CHAT_REDIRECTS_CONF": str(tmp_path / "r.conf"),
+           "CHAT_RATE_HTTP_CONF": str(tmp_path / "h.conf"), "CHAT_RATE_SERVER_CONF": str(tmp_path / "s.conf"),
+           "CHAT_THEMES_DIR": str(themes_dir or ROOT / "image" / "themes"),
+           "CHAT_THEME_HTTP_CONF": str(th), "CHAT_THEME_SERVER_CONF": str(ts)}
+    if value is not None:
+        env["CHAT_THEMES"] = value
+    r = subprocess.run(["bash", str(ROOT / "image" / "bin" / "chat-entrypoint")], env=env, capture_output=True, text=True)
+    return r, th, ts
+
+
+def test_theme_map_and_injection_are_generated(tmp_path):
+    r, th, ts = themes(tmp_path, "chat.orfe.example.edu=paper-tiger orfe-chat-dept.x.io=paper-tiger")
+    assert r.returncode == 0 and "theme(s) for 2 host(s)" in r.stdout
+    http = th.read_text()
+    assert "map $host $chat_theme_link {" in http and 'default "";' in http
+    assert "    chat.orfe.example.edu '<link rel=\"stylesheet\" href=\"/chat-theme/paper-tiger/theme.css?v=" in http
+    server = ts.read_text()
+    assert "sub_filter '</head>' '$chat_theme_link</head>';" in server
+    assert "include /etc/nginx/zulip-include/headers;" in server
+
+
+@pytest.mark.parametrize("value", ["chat.orfe.example.edu=neon", "chat.orfe.example.edu",
+                                   "chat.orfe.example.edu=paper-tiger;evil", "Bad_Host=paper-tiger",
+                                   "chat.orfe.example.edu=../../etc"])
+def test_bad_theme_entries_turn_themes_off(tmp_path, value):
+    r, th, ts = themes(tmp_path, value)
+    assert r.returncode == 0 and "themes OFF" in r.stderr
+    assert not th.exists() and not ts.exists()
+
+
+def test_no_themes_removes_old_files(tmp_path):
+    themes(tmp_path, "chat.orfe.example.edu=paper-tiger")
+    r, th, ts = themes(tmp_path, None)
+    assert "Zulip default look" in r.stdout and not th.exists() and not ts.exists()
+
+
+def test_every_theme_follows_the_rules():
+    import re
+    for css in (ROOT / "image" / "themes").glob("*/theme.css"):
+        text = css.read_text()
+        body = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+        assert "url(" not in body and "@import" not in body, f"{css}: no external or file references"
+        selectors = {s.strip() for s in re.findall(r"([^{}]+)\{", body)}
+        assert selectors <= {":root", "::selection"}, f"{css}: tokens only, found {selectors}"
+        assert "light-dark(" in body, f"{css}: needs dark values"

@@ -17,6 +17,7 @@ servers:
     kind: dedicated
     host: chat.e2e.test
     realm: {name: E2E Department, owner: {email: owner@e2e.test, name: E2E Owner}}
+    theme: paper-tiger
     entra: {client_id: 11111111-2222-3333-4444-555555555555}
   groups:
     kind: shared

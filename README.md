@@ -392,9 +392,13 @@ The single-server scripts (`teardown-server.zsh`, `teardown-platform.zsh`) remai
 | Health right now | `keepalive.zsh --config <dept>`; with Healthchecks, `healthchecks.zsh --list` |
 | Remove servers or everything | `teardown.zsh`, or the Teardown workflow (see Teardown above) |
 
-## Custom look
+## Custom look (themes)
 
-It is possible to give some instances a custom look (e.g. Princeton/ORFE styling from paper-tiger) and leave others on Zulip's default. It is not built yet; [docs/theming.md](docs/theming.md) has the findings, a verified proof of concept, and the plan.
+`theme: paper-tiger` on a server (or per realm on a shared server; `default` keeps Zulip's look) recolours Zulip with Princeton orange. It covers buttons, links, focus, mentions, pills, the unread marker and the login pages, in light and dark.
+- Themes override only Zulip's CSS variables, and the e2e suite checks each one still exists in the running Zulip.
+- Logos and icons are set per realm in Zulip itself.
+
+See [docs/theming.md](docs/theming.md).
 
 ## Tests
 

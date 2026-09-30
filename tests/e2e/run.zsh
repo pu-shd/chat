@@ -124,5 +124,22 @@ if "${compose[@]}" run --rm -T -e CHAT_HC_TARGET=http://zulip/no-such-health-end
   print -u2 "the hc probe should have failed against a bad target"; exit 1
 fi
 
+# Theme drift: every Zulip variable a theme sets must still be defined by this Zulip's CSS
+# (all bundles, including the ones the web app loads on demand).
+docker exec "$cid" sh -c 'cat /home/zulip/prod-static/webpack-bundles/*.css' > "$state/zulip.css"
+"$py" - "$state/zulip.css" "$root"/image/themes/*/theme.css <<'PY'
+import re, sys
+defined = set(re.findall(r"(--color-[a-z0-9-]+)\s*:", open(sys.argv[1]).read()))
+assert len(defined) > 100, f"only {len(defined)} Zulip variables found; wrong files?"
+bad = {}
+for theme in sys.argv[2:]:
+    ours = set(re.findall(r"(--color-[a-z0-9-]+)\s*:", open(theme).read()))
+    missing = sorted(ours - defined)
+    if missing:
+        bad[theme] = missing
+    print(f"theme {theme.split('/')[-2]}: {len(ours)} Zulip variables, all defined" if not missing else f"theme {theme}: MISSING {missing}", file=sys.stderr)
+sys.exit(1 if bad else 0)
+PY
+
 "${compose[@]}" run --rm -T runner
 print -u2 "e2e passed"

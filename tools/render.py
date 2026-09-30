@@ -147,6 +147,18 @@ def load_config(dept_dir: Path) -> dict[str, Any]:
     return cfg
 
 
+def available_themes() -> set[str]:
+    return {p.parent.name for p in (TEMPLATE_ROOT / "image" / "themes").glob("*/theme.css")}
+
+
+def check_theme(name: str | None, where: str) -> str | None:
+    if name in (None, "default"):
+        return None
+    if name not in available_themes():
+        raise ConfigError(f"{where}: theme '{name}' is not in this template (have: {', '.join(sorted(available_themes())) or 'none'})")
+    return name
+
+
 def is_reserved(slug: str) -> bool:
     """Mirror of zerver/lib/name_restrictions.is_reserved_subdomain (settings-free parts)."""
     if slug == SOCIAL_AUTH_SUBDOMAIN:
@@ -397,8 +409,12 @@ def render_config(cfg: dict[str, Any], dept_dir: Path) -> Rendered:
         db = f"zulip_{name.replace('-', '_')}"
         realms: list[dict[str, Any]] = []
         hosts: list[str] = []
+        server_theme = check_theme(s.get("theme"), f"servers.{name}")
+        themes: list[dict[str, Any]] = []
         if s["kind"] == "dedicated":
             claim_host(s["host"], f"servers.{name}")
+            if server_theme:
+                themes.append({"host": s["host"], "preview": True, "theme": server_theme})
             hosts.append(s["host"])
             realms.append({
                 "slug": "", "name": s["realm"]["name"], "owner": s["realm"]["owner"],
@@ -415,6 +431,9 @@ def render_config(cfg: dict[str, Any], dept_dir: Path) -> Rendered:
             auth_host = f"{SOCIAL_AUTH_SUBDOMAIN}.{ext}"
             claim_host(ext, f"servers.{name}")
             claim_host(auth_host, f"servers.{name} (OIDC callback)")
+            if server_theme:
+                themes += [{"host": ext, "preview": False, "theme": server_theme},
+                           {"host": auth_host, "preview": False, "theme": server_theme}]
             hosts += [ext, auth_host]
             active = [r for r in s["realms"] if r.get("active", True)]
             if not active:
@@ -425,6 +444,10 @@ def render_config(cfg: dict[str, Any], dept_dir: Path) -> Rendered:
                 live_host = f"{r['slug']}.{s['realm_domain']}"
                 is_active = r.get("active", True)
                 if is_active:
+                    realm_theme = check_theme(r["theme"], f"servers.{name}.realms[{r['slug']}]") if "theme" in r \
+                        else server_theme
+                    if realm_theme:
+                        themes.append({"host": live_host, "preview": r["slug"] == preview_realm, "theme": realm_theme})
                     claim_host(live_host, f"servers.{name}.realms[{r['slug']}]")
                     hosts.append(live_host)
                     redirect_targets.append({"slug": r["slug"], "server": name, "realm": r["slug"]})
@@ -507,6 +530,7 @@ def render_config(cfg: dict[str, Any], dept_dir: Path) -> Rendered:
             "preview_realm": preview_realm,
             "realms": realms,
             "redirects": [],
+            "themes": themes,
             "settings": settings,
             # Least privilege: each identity may read only these Key Vault secrets
             # (granted per secret by grant-access.zsh; deploy-server.zsh checks them).
@@ -613,6 +637,7 @@ def zulip_settings(plat, s, name, db, tenant, entra, preview_realm) -> dict[str,
                              f"api:{rl['api_per_second']}r/s:{rl['api_burst']}") if rl["enabled"] else "",
         "CHAT_RATE_LIMIT_EXEMPT": " ".join(rl["exempt_ranges"]) if rl["enabled"] else "",
         "CHAT_SERVER_NAME": name,
+        "CHAT_THEMES": "{{themes}}",
     }
     if s["kind"] == "shared":
         env["SETTING_REALM_HOSTS"] = "{{realm_hosts}}"
@@ -707,7 +732,15 @@ def resolve_settings(spec, peers, default_domain, oidc_client_id, acs_mail_from=
     fqdn = app_fqdn(spec, default_domain)
     live = spec["dns"] == "live"
     conf, skipped = redirects_conf(spec, peers, default_domain)
+    # host=theme for each themed host: its live name, and the pre-DNS name for the realm
+    # that answers there before DNS.
+    theme_pairs = []
+    for t in spec.get("themes", []):
+        theme_pairs.append(f"{t['host']}={t['theme']}")
+        if t["preview"]:
+            theme_pairs.append(f"{fqdn}={t['theme']}")
     values = {
+        "themes": " ".join(dict.fromkeys(theme_pairs)),
         "acs_mail_from": acs_mail_from or "",
         "external_host": spec["external_host_live"] if live else fqdn,
         "oidc_client_id": oidc_client_id,
