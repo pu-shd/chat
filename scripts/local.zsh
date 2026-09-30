@@ -10,7 +10,7 @@
 #   --server  which server to run (default: dept, else the first); one at a time
 #   --theme   override the server's theme, e.g. to compare paper-tiger with default
 #
-# Every host becomes <host>.localhost (chat.orfe.princeton.edu -> chat.orfe.princeton.edu.localhost),
+# Every host becomes <host>.localhost (chat.<dept>.princeton.edu -> chat.<dept>.princeton.edu.localhost),
 # which macOS resolves to 127.0.0.1 by itself. TLS comes from a local CA: accept the
 # browser warning, or run `local.zsh trust` once to add that CA to your login keychain.
 # Ports 443, 9080 (mock Entra) and 8025 (mail UI) on 127.0.0.1 must be free. Rerunning

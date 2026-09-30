@@ -8,7 +8,7 @@ name: Deploy one Zulip server (reusable)
 on:
   workflow_call:
     inputs:
-      config_dir: {type: string, required: true, description: "department directory in the caller, e.g. orfe"}
+      config_dir: {type: string, required: true, description: "department directory in the caller, e.g. <dept>"}
       server: {type: string, required: true}
       environment: {type: string, required: true}
       template_ref: {type: string, required: true, description: "tag of pu-shd/chat, from template.lock"}

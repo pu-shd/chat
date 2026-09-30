@@ -37,7 +37,7 @@ What protects a public Zulip server here once `ip_gate` is off, and whether Azur
    - **Standard:** Container Apps IP rules do not accept service tags. Maintain the published `AzureFrontDoor.Backend` IPv4 ranges as an allowlist; the IP-gate machinery already syncs a signed, validated allowlist and could take this second source.
    - **Also on Standard:** require the `X-Azure-FDID` header with this profile's ID in nginx, because the backend ranges are shared by every Front Door customer.
    - **Premium:** use Private Link to the environment and set its public network access to Disabled. This is supported on workload-profiles environments like this one.
-4. **Host names and certificates.** Keep the original Host (Microsoft's recommendation), so Zulip sees `chat.orfe.princeton.edu`:
+4. **Host names and certificates.** Keep the original Host (Microsoft's recommendation), so Zulip sees `chat.<dept>.princeton.edu`:
    - The custom domain must stay bound on the Container App with a certificate that Front Door validates.
    - Once public DNS points at Front Door, an ACA **managed** certificate can no longer be issued or renewed, so bind a **Key Vault certificate** on the app (the `cert.key_vault_certificate` path gated servers already use).
    - Front Door gets its own managed certificate for the same names.

@@ -2,13 +2,13 @@
 
 Vend [Zulip](https://zulip.com) chat workspaces on Azure for Princeton departments and research groups.
 This public repo is the **template**: infrastructure, image, scripts, and reusable workflows.
-Each department keeps a small **private config repo** (for example `pu-orfe/chat-config`) that holds one `chat.yml` and deploys through GitOps.
+Each department keeps a small **private config repo** (for example `pu-<dept>/chat-config`) that holds one `chat.yml` and deploys through GitOps.
 It follows the same pattern as `page-stream` / `page-stream-config`.
 
 ```
-pu-orfe/chat-config (private)                pu-shd/chat (public, this repo)
+pu-<dept>/chat-config (private)              pu-shd/chat (public, this repo)
 ├── template.lock  ── pins ref + commit sha ─▶ release vX.Y.Z (commit)
-├── orfe/chat.yml  ── tools/render.py ──────▶ orfe/generated/*.json   (committed, CI-checked)
+├── <dept>/chat.yml  ── tools/render.py ────▶ <dept>/generated/*.json   (committed, CI-checked)
 └── .github/workflows/deploy.yml ── uses ───▶ build-image.yml@sha   → az acr build into the
                                                                        department's registry
                                               deploy-server.yml@sha → infra/server.bicep
@@ -51,24 +51,24 @@ pu-orfe/chat-config (private)                pu-shd/chat (public, this repo)
 ## A department's `chat.yml`
 
 ```yaml
-department: orfe
-azure: {tenant_id: …, subscription_id: …, region: canadacentral, prefix: orfe-chat}
-github: {repo: pu-orfe/chat-config, environment: orfe}
-admin_email: chat-admin@orfe.princeton.edu
-email: {provider: resend, from: noreply@orfe.princeton.edu}
+department: <dept>
+azure: {tenant_id: …, subscription_id: …, region: canadacentral, prefix: <dept>-chat}
+github: {repo: pu-<dept>/chat-config, environment: <dept>}
+admin_email: chat-admin@<dept>.princeton.edu
+email: {provider: resend, from: noreply@<dept>.princeton.edu}
 defaults: {dns: pending, cpu: 2.0}
 ip_gate: {enabled: false}               # or leave it on and gate individual servers
 servers:
-  dept:                                  # chat.orfe.princeton.edu (+ the /<slug> redirects)
+  dept:                                  # chat.<dept>.princeton.edu (+ the /<slug> redirects)
     kind: dedicated
-    host: chat.orfe.princeton.edu
-    realm: {name: ORFE, owner: {email: …, name: …}}
-  groups:                                # <slug>.chat.orfe.princeton.edu, one realm per group
+    host: chat.<dept>.princeton.edu
+    realm: {name: <Department>, owner: {email: …, name: …}}
+  groups:                                # <slug>.chat.<dept>.princeton.edu, one realm per group
     kind: shared
-    external_host: groups.chat.orfe.princeton.edu
-    realm_domain: chat.orfe.princeton.edu
+    external_host: groups.chat.<dept>.princeton.edu
+    realm_domain: chat.<dept>.princeton.edu
     realms:
-      - {slug: ahmadi-group, name: Ahmadi Group, owner: {email: …, name: …}}
+      - {slug: example-group, name: Example Group, owner: {email: …, name: …}}
 ```
 
 - The schema is in [`schema/chat.schema.json`](schema/chat.schema.json).
@@ -89,10 +89,10 @@ You need:
 The image is built in Azure (ACR Tasks), so the operator needs no Docker.
 
 ```zsh
-git clone git@github.com:pu-orfe/chat-config.git && cd chat-config
+git clone git@github.com:pu-<dept>/chat-config.git && cd chat-config
 git clone https://github.com/pu-shd/chat.git .chat-template && git -C .chat-template checkout "$(jq -r .sha template.lock)"
 .chat-template/scripts/setup-venv.zsh
-.chat-template/scripts/bootstrap.zsh --config orfe --set-gh-vars
+.chat-template/scripts/bootstrap.zsh --config <dept> --set-gh-vars
 ```
 
 `bootstrap.zsh` is colourful, interactive on a terminal, and resumable. It shows a banner (department, template commit, state file) and numbered steps with timings, and ends with a summary.
@@ -112,7 +112,7 @@ The steps:
 | `prereqs` | | tools, venv, Azure login, `render --check` |
 | `platform` | `deploy-platform.zsh` | resource group, Key Vault, network, environment, PostgreSQL, storage, container registry |
 | `image` | `build-image.zsh` | builds `chat:<ref>-<sha7>` in the registry with ACR Tasks from template.lock's commit (this checkout must be exactly that commit), locks the tag, and imports the sidecar images |
-| `github` | `setup-github-oidc.zsh` | CI app registration with federated credentials for the Environments `orfe` and `orfe-admin`; Contributor on the resource group; Key Vault Secrets Officer. With `--set-gh-vars`, it also runs `setup-github-repo.zsh` (see Security model) and sets the `AZURE_*` repository variables |
+| `github` | `setup-github-oidc.zsh` | CI app registration with federated credentials for the Environments `<dept>` and `<dept>-admin`; Contributor on the resource group; Key Vault Secrets Officer. With `--set-gh-vars`, it also runs `setup-github-repo.zsh` (see Security model) and sets the `AZURE_*` repository variables |
 | `secrets` | | asks for the Resend key, which goes to Key Vault (with `provider: acs`, runs `acs-email.zsh` instead). Optionally `PUGWIPS_READ_TOKEN` (becomes a GitHub secret) when a server is gated. With Healthchecks enabled, also the ping key (Key Vault and GitHub `HEALTHCHECKS_PING_KEY`) and, optionally, the API key |
 | `entra` | `entra-app.zsh` | per server: Zulip's sign-in app registration and redirect URIs; the client secret goes straight into Key Vault |
 | `access` | `grant-access.zsh` | per server: its two managed identities, each granted read on only its own Key Vault secrets, plus AcrPull on the registry |
@@ -133,8 +133,8 @@ Before the first bootstrap, cut a template release (`git tag vX.Y.Z && git push 
 Every server is `dns: pending` until you say otherwise. A pending server is configured for, and answers on, its Container App name, which Azure already covers with TLS:
 
 ```
-https://orfe-chat-dept.<environment-default-domain>/      ← department (root realm)
-https://orfe-chat-groups.<environment-default-domain>/    ← the shared server's preview_realm
+https://<dept>-chat-dept.<environment-default-domain>/      ← department (root realm)
+https://<dept>-chat-groups.<environment-default-domain>/    ← the shared server's preview_realm
 ```
 
 **What works while pending:**
@@ -149,14 +149,14 @@ https://orfe-chat-groups.<environment-default-domain>/    ← the shared server'
 `scripts/local.zsh` runs one server from a `chat.yml` on your machine, so you can click around a department's workspace (theme, realm name, login page, redirects, mail) before anything exists in Azure. It needs Docker, `docker-compose` and `scripts/setup-venv.zsh`.
 
 ```zsh
-scripts/local.zsh up --config ../chat-config/orfe                    # the dept server
-scripts/local.zsh up --config ../chat-config/orfe --server groups    # or one server at a time
-scripts/local.zsh up --config ../chat-config/orfe --theme default    # compare with Zulip's look
+scripts/local.zsh up --config ../chat-config/<dept>                    # the dept server
+scripts/local.zsh up --config ../chat-config/<dept> --server groups    # or one server at a time
+scripts/local.zsh up --config ../chat-config/<dept> --theme default    # compare with Zulip's look
 scripts/local.zsh status | logs | trust | down
 ```
 
 - It builds the image from **this checkout**, so uncommitted theme or image changes show up. The settings come from `render.py` exactly as a deploy would produce them. Only the host names change, and the services point at local containers: PostgreSQL (with a non-superuser admin, like Azure's), the sidecars, a mock Entra and a mail sink.
-- **Hosts** become `<host>.localhost`, for example `https://chat.orfe.princeton.edu.localhost/`. macOS resolves every `*.localhost` name to 127.0.0.1 by itself, so `/etc/hosts` needs no edits.
+- **Hosts** become `<host>.localhost`, for example `https://chat.<dept>.princeton.edu.localhost/`. macOS resolves every `*.localhost` name to 127.0.0.1 by itself, so `/etc/hosts` needs no edits.
 - **Sign-in:** "Log in with Microsoft" goes to a mock Entra at `http://login.localhost:9080` that signs you straight in as the realm owner from `chat.yml`. Nothing contacts Princeton's tenant.
 - **Mail** Zulip sends (invitations, for example) shows up at `http://localhost:8025`.
 - **TLS** comes from a local CA (Caddy, standing in for Container Apps ingress). Accept the browser warning, or run `local.zsh trust` once to trust that CA in your login keychain; remove it from Keychain Access after `down`. Firefox uses its own certificate store.
@@ -166,29 +166,29 @@ scripts/local.zsh status | logs | trust | down
 ## Going live: CNAMEs for OIT
 
 ```zsh
-.chat-template/scripts/bind-domain.zsh --config orfe --server dept --print   # ticket text
+.chat-template/scripts/bind-domain.zsh --config <dept> --server dept --print   # ticket text
 ```
 
 Each hostname needs two records. The values come from the platform, so the ticket can be filed as soon as `deploy-platform.zsh` has run:
 
 | Type | Name | Value |
 |---|---|---|
-| CNAME | `chat.orfe.princeton.edu` | `orfe-chat-dept.<environment-default-domain>` |
-| TXT | `asuid.chat.orfe.princeton.edu` | the environment's `customDomainVerificationId` |
+| CNAME | `chat.<dept>.princeton.edu` | `<dept>-chat-dept.<environment-default-domain>` |
+| TXT | `asuid.chat.<dept>.princeton.edu` | the environment's `customDomainVerificationId` |
 
-**Records needed for the ORFE layout:**
-- **Department:** `chat.orfe.princeton.edu` → the `dept` app.
+**Records needed for the layout above:**
+- **Department:** `chat.<dept>.princeton.edu` → the `dept` app.
 - **Shared server, once:**
-  - `groups.chat.orfe.princeton.edu` → the `groups` app;
-  - `auth.groups.chat.orfe.princeton.edu` → the `groups` app. This is the single OIDC callback host for every group realm, so adding a realm needs no Entra change.
-- **Each group realm:** `<slug>.chat.orfe.princeton.edu` → the `groups` app, or → its own app if the group has a dedicated server.
-- `chat.orfe.princeton.edu/<slug>` needs no DNS; it is a redirect.
+  - `groups.chat.<dept>.princeton.edu` → the `groups` app;
+  - `auth.groups.chat.<dept>.princeton.edu` → the `groups` app. This is the single OIDC callback host for every group realm, so adding a realm needs no Entra change.
+- **Each group realm:** `<slug>.chat.<dept>.princeton.edu` → the `groups` app, or → its own app if the group has a dedicated server.
+- `chat.<dept>.princeton.edu/<slug>` needs no DNS; it is a redirect.
 
 **Once OIT confirms the records, for each server:**
-1. `bind-domain.zsh --config orfe --server <name> --wait 30` checks the records, then binds each hostname with a free managed certificate.
+1. `bind-domain.zsh --config <dept> --server <name> --wait 30` checks the records, then binds each hostname with a free managed certificate.
    - A server with `ip_gate: true` cannot use a managed certificate, because DigiCert must reach the app. Give it `cert: {key_vault_certificate: <name>}`, for example an OIT/InCommon certificate imported into Key Vault.
 2. Set `dns: live` for that server in `chat.yml`, then `render`.
-3. Run `entra-app.zsh --config orfe --server <name>` to add the live callback URL. The preview URL is kept until `--prune-redirects`.
+3. Run `entra-app.zsh --config <dept> --server <name>` to add the live callback URL. The preview URL is kept until `--prune-redirects`.
 4. Commit and push. CI redeploys and Zulip's `EXTERNAL_HOST` switches to the real name.
    - Mobile and desktop users who added the preview URL re-add the real one.
 
@@ -276,8 +276,8 @@ To stop depending on Resend, or keep mail inside the subscription:
 ```yaml
 email:
   provider: acs
-  from: donotreply@orfe.princeton.edu   # custom domain: the only sender until a quota increase
-  acs: {domain: orfe.princeton.edu}     # or {domain: azure-managed}, and no `from`
+  from: donotreply@<dept>.princeton.edu   # custom domain: the only sender until a quota increase
+  acs: {domain: <dept>.princeton.edu}     # or {domain: azure-managed}, and no `from`
 ```
 
 **Sender rules ACS enforces:**
@@ -290,7 +290,7 @@ email:
   - The Azure-managed domain is fixed at 5/minute and 10/hour, which only works as a stopgap.
 
 1. `deploy-platform.zsh` creates the Email service, the domain, its sender username(s) and the Communication Services resource.
-2. `acs-email.zsh --config orfe`, run by an operator and also by `bootstrap.zsh`:
+2. `acs-email.zsh --config <dept>`, run by an operator and also by `bootstrap.zsh`:
    - creates the Entra app whose client secret authenticates SMTP;
    - grants it Communication and Email Service Owner on the ACS resource;
    - stores the secret as `email-password`, with its expiry recorded for the keepalive;
@@ -384,7 +384,7 @@ healthchecks:
 
 | Where | How |
 |---|---|
-| Locally | `scripts/teardown.zsh --config orfe [--server x] [--purge] [--healthchecks] [--entra] [--platform] [--github]`, the reverse of `bootstrap.zsh`. It asks for one confirmation, `TEARDOWN <dept>` (or `TEARDOWN <dept> PURGE`) |
+| Locally | `scripts/teardown.zsh --config <dept> [--server x] [--purge] [--healthchecks] [--entra] [--platform] [--github]`, the reverse of `bootstrap.zsh`. It asks for one confirmation, `TEARDOWN <dept>` (or `TEARDOWN <dept> PURGE`) |
 | CI | the config repo's **Teardown** workflow (manual): dept, one server or all, purge, platform, and the same phrase |
 
 | Mode | Effect |

@@ -1,6 +1,6 @@
 # Custom look for Zulip instances
 
-Instances can have a custom look (e.g. Princeton / ORFE styling) while others keep Zulip's default. There are two layers.
+Instances can have a custom look (e.g. Princeton styling) while others keep Zulip's default. There are two layers.
 
 ## 1. Zulip's own branding (per realm, set in Zulip)
 
@@ -19,13 +19,13 @@ Logos are deliberately **not** shipped in this public repo: Princeton marks are 
 servers:
   dept:
     kind: dedicated
-    host: chat.orfe.princeton.edu
+    host: chat.<dept>.princeton.edu
     theme: paper-tiger            # this server's realm
   groups:
     kind: shared
     theme: paper-tiger            # every realm on it…
     realms:
-      - {slug: ahmadi-group, …}
+      - {slug: example-group, …}
       - {slug: beta-lab, …, theme: default}   # …except this one: Zulip's own look
 ```
 
@@ -33,7 +33,7 @@ Themes ship in the image under `image/themes/<name>/theme.css`. Available now:
 
 | Theme | Look |
 |---|---|
-| `paper-tiger` | Princeton orange from the ORFE "Paper Tiger" kit (accent `#e77500`, ink `#333`), with light and dark values |
+| `paper-tiger` | Princeton orange from the "Paper Tiger" design kit (accent `#e77500`, ink `#333`), with light and dark values |
 
 **What the theme recolours:** primary/secondary buttons, banners, links, the focus ring, mentions of you, input pills, sidebar hover, the unread marker, an orange rule under the navbar, and the login/sign-up pages' buttons, links and footer. Everything else stays Zulip.
 
