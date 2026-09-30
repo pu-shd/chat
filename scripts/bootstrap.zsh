@@ -9,7 +9,8 @@
 #   prereqs   tools, Python venv, Azure login, chat.yml renders cleanly
 #   platform  deploy-platform.zsh — RG, Key Vault, network, environment, PostgreSQL, storage
 #   github    setup-github-oidc.zsh — CI identity (+ GitHub Environment vars with --set-gh-vars)
-#   secrets   Resend API key → Key Vault; optional PUGWIPS_READ_TOKEN → GitHub secret;
+#   secrets   Resend API key → Key Vault (or, with email.provider acs, acs-email.zsh:
+#             SMTP credentials + domain verification); optional PUGWIPS_READ_TOKEN;
 #             with healthchecks.enabled, the ping key (→ Key Vault + GitHub secret
 #             HEALTHCHECKS_PING_KEY) and optional API key (→ Key Vault)
 #   entra     entra-app.zsh per server — Zulip sign-in app registration, secret in Key Vault
@@ -99,7 +100,10 @@ fi
 # ------------------------------------------------------------------ secrets
 if run_step secrets; then
   log_step "secrets"
-  if kv_secret_exists email-password; then
+  if [[ "$(jqp .email.provider)" == acs ]]; then
+    # ACS: an Entra app's client secret is the SMTP password; acs-email.zsh makes it.
+    "$S/acs-email.zsh" --config "$CONFIG_DIR" "${YES[@]}"
+  elif kv_secret_exists email-password; then
     log_ok "email-password (Resend API key) present"
   else
     [[ -t 0 ]] || die "Key Vault needs email-password (the Resend API key); run bootstrap interactively or: az keyvault secret set --vault-name $KV_NAME --name email-password --file <file>"
@@ -213,6 +217,9 @@ if run_step dns; then
       "$S/bind-domain.zsh" --config "$CONFIG_DIR" --server "$s" --print
       print -r -- ""
     done
+    if [[ "$(jqp .email.provider)" == acs && "$(jqp .acs.managed)" != true ]]; then
+      "$S/acs-email.zsh" --config "$CONFIG_DIR" --print
+    fi
   } > "$OUT_FILE"
   log_ok "wrote $OUT_FILE — send it to OIT (hostmaster) to create the records"
 fi

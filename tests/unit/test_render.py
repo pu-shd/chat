@@ -393,3 +393,70 @@ def test_hourly_health_interval_cron(dept, capsys):
 def test_healthchecks_schema(dept, capsys, bad):
     dept.edit(lambda c: c.update(healthchecks=bad))
     assert "schema validation failed" in rerender_error(dept, capsys)
+
+
+def test_ip_gate_can_be_dropped_entirely(dept, capsys):
+    (dept.path / "pugwips-snapshot.json").unlink()
+    dept.edit(lambda c: c.update(ip_gate={"enabled": False}))
+    assert "ip_gate is true but ip_gate.enabled is false" in rerender_error(dept, capsys)
+    dept.edit(lambda c: c["servers"]["lab"].pop("ip_gate"))
+    dept.render()  # no snapshot, no fallback needed
+    plat = json.loads((dept.path / "generated" / "platform.json").read_text())
+    assert plat["ip_gate"]["enabled"] is False
+    assert not any(dept.server(s)["ip_gate"] for s in ("dept", "groups", "lab"))
+
+
+# ---------------------------------------------------------------- email: ACS
+
+
+def use_acs(dept, domain, **email):
+    dept.edit(lambda c: c.update(email={"provider": "acs", "acs": {"domain": domain}, **email}))
+
+
+def test_acs_custom_domain(dept, capsys):
+    use_acs(dept, "orfe.example.edu", **{"from": "donotreply@orfe.example.edu"})
+    dept.render()
+    err = capsys.readouterr().err
+    assert "retires ACS Email on 2028-09-30" in err and "30 mails/minute" in err
+    plat = json.loads((dept.path / "generated" / "platform.json").read_text())
+    assert plat["email"] == {"provider": "acs", "host": "smtp.azurecomm.net", "port": 587, "user": "orfe-chat-smtp",
+                             "from": "donotreply@orfe.example.edu", "from_name": "ORFE Chat"}
+    assert plat["acs"] == {"email_service": "orfe-chat-email", "communication_service": "orfe-chat-acs",
+                           "domain": "orfe.example.edu", "managed": False, "data_location": "United States",
+                           "smtp_username_resource": "orfe-chat-smtp", "entra_app": "orfe-chat-acs-smtp",
+                           "senders": []}
+    env = resolve(dept, "dept", capsys)["_env"]
+    assert (env["SETTING_EMAIL_HOST"], env["SETTING_EMAIL_HOST_USER"]) == ("smtp.azurecomm.net", "orfe-chat-smtp")
+    assert env["SETTING_NOREPLY_EMAIL_ADDRESS"] == "donotreply@orfe.example.edu"
+
+
+def test_acs_custom_sender_needs_approved_quota(dept, capsys):
+    use_acs(dept, "orfe.example.edu", **{"from": "noreply@orfe.example.edu"})
+    assert "until Microsoft approves a quota increase" in rerender_error(dept, capsys)
+    dept.edit(lambda c: c["email"]["acs"].update(custom_senders=True))
+    dept.render()
+    assert json.loads((dept.path / "generated" / "platform.json").read_text())["acs"]["senders"] == ["noreply"]
+
+
+def test_acs_managed_domain_resolves_sender_at_deploy(dept, capsys):
+    use_acs(dept, "azure-managed")
+    dept.render()
+    assert "10/hour" in capsys.readouterr().err
+    assert render.main(["resolve", "--server", str(dept.path / "generated/servers/dept.json"),
+                        "--default-domain", DOMAIN, "--image", IMAGE]) == 2
+    assert "pass --acs-mail-from" in capsys.readouterr().err
+    env = resolve(dept, "dept", capsys, "--acs-mail-from", "DoNotReply@1234abcd.azurecomm.net")["_env"]
+    assert env["SETTING_NOREPLY_EMAIL_ADDRESS"] == "DoNotReply@1234abcd.azurecomm.net"
+    assert env["SETTING_DEFAULT_FROM_EMAIL"] == "ORFE Chat <DoNotReply@1234abcd.azurecomm.net>"
+
+
+@pytest.mark.parametrize("email, message", [
+    ({"provider": "acs"}, "needs email.acs.domain"),
+    ({"provider": "acs", "acs": {"domain": "orfe.example.edu"}, "from": "noreply@other.example.edu"}, "must be an address @orfe.example.edu"),
+    ({"provider": "acs", "acs": {"domain": "azure-managed"}, "from": "noreply@orfe.example.edu"}, "drop email.from"),
+    ({"provider": "acs", "acs": {"domain": "orfe.example.edu"}, "from": "donotreply@orfe.example.edu", "host": "x.example.edu"}, "set by provider 'acs'"),
+    ({"provider": "resend"}, "needs email.from"),
+])
+def test_acs_validation(dept, capsys, email, message):
+    dept.edit(lambda c: c.update(email=email))
+    assert message in rerender_error(dept, capsys)

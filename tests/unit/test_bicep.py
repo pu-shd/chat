@@ -122,3 +122,14 @@ def test_healthchecks_job_is_optional_scheduled_and_embeds_the_pinger(server):
     assert (ROOT / "image" / "bin" / "chat-hc-ping").read_text() == var(server, c["command"][2])
     assert "http://${appName}/health" not in json.dumps(c["env"])  # interpolated, not literal
     assert "/health" in json.dumps(c["env"])
+
+
+def test_platform_email_resources_are_conditional():
+    tpl = build("platform.bicep")
+    for rtype in ["Microsoft.Communication/emailServices", "Microsoft.Communication/emailServices/domains",
+                  "Microsoft.Communication/communicationServices"]:
+        (r,) = resource(tpl, rtype)
+        assert r["condition"] == "[variables('useAcs')]", rtype
+    assert tpl["variables"]["useAcs"] == "[not(empty(parameters('acs')))]"
+    comm = resource(tpl, "Microsoft.Communication/communicationServices")[0]
+    assert "acsLinkedDomains" in json.dumps(comm["properties"]["linkedDomains"])

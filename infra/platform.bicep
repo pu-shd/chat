@@ -22,6 +22,11 @@ param postgresAdminPassword string
 param postgresSku string = 'Standard_B1ms'
 param postgresVersion string = '17'
 param tags object = {}
+@description('Azure Communication Services Email (platform.json "acs"); {} when mail goes elsewhere')
+param acs object = {}
+@description('Domains already linked to the Communication Services resource (kept on redeploy; a custom domain is linked by acs-email.zsh once its DNS verifies)')
+param acsLinkedDomains array = []
+param mailFromName string = 'Chat'
 
 var pgTier = startsWith(postgresSku, 'Standard_B') ? 'Burstable' : (contains(postgresSku, 'E') ? 'MemoryOptimized' : 'GeneralPurpose')
 
@@ -157,6 +162,47 @@ resource environment 'Microsoft.App/managedEnvironments@2025-01-01' = {
   }
 }
 
+// ---------------------------------------------------------------- email (optional)
+
+var useAcs = !empty(acs)
+var acsManaged = acs.?managed ?? false
+
+resource emailService 'Microsoft.Communication/emailServices@2023-04-01' = if (useAcs) {
+  name: acs.?email_service ?? 'unused-email'
+  location: 'global'
+  tags: tags
+  properties: { dataLocation: acs.?data_location ?? 'United States' }
+}
+
+resource emailDomain 'Microsoft.Communication/emailServices/domains@2023-04-01' = if (useAcs) {
+  parent: emailService
+  name: acs.?domain ?? 'unused.example'
+  location: 'global'
+  tags: tags
+  properties: {
+    domainManagement: acsManaged ? 'AzureManaged' : 'CustomerManaged'
+    userEngagementTracking: 'Disabled'
+  }
+}
+
+// Custom domains send only from configured sender usernames (Azure-managed: DoNotReply).
+resource senders 'Microsoft.Communication/emailServices/domains/senderUsernames@2023-04-01' = [for s in (useAcs ? (acs.?senders ?? []) : []): {
+  parent: emailDomain
+  name: s
+  properties: { username: s, displayName: mailFromName }
+}]
+
+resource communication 'Microsoft.Communication/communicationServices@2023-04-01' = if (useAcs) {
+  name: acs.?communication_service ?? 'unused-acs'
+  location: 'global'
+  tags: tags
+  properties: {
+    dataLocation: acs.?data_location ?? 'United States'
+    // An Azure-managed domain is verified at creation and can be linked at once.
+    linkedDomains: acsManaged ? [ emailDomain.id ] : acsLinkedDomains
+  }
+}
+
 output environmentId string = environment.id
 output defaultDomain string = environment.properties.defaultDomain
 output staticIp string = environment.properties.staticIp
@@ -165,3 +211,5 @@ output identityId string = identity.id
 output identityClientId string = identity.properties.clientId
 output logAnalyticsCustomerId string = logs.properties.customerId
 output postgresFqdn string = postgres.properties.fullyQualifiedDomainName
+output acsMailFrom string = useAcs && acsManaged ? 'DoNotReply@${emailDomain!.properties.mailFromSenderDomain}' : ''
+output acsDomainId string = useAcs ? emailDomain.id : ''

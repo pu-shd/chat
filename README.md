@@ -32,7 +32,10 @@ pu-orfe/chat-config (private)                pu-shd/chat (public, this repo)
   - a **realm on the shared `groups` server** (cheap), or
   - a **dedicated server** (isolated, for groups that need their own data and upgrade schedule).
 
-**Email** goes out through Resend SMTP (port 587; Azure blocks 25).
+**Email** goes out over SMTP on port 587 (Azure blocks 25), through one of:
+- **Resend** (`provider: resend`, the default choice). The API key goes into Key Vault as `email-password`.
+- **Azure Communication Services** (`provider: acs`). See Email with Azure Communication Services.
+- Any other relay (`provider: smtp`, with `host`, `port` and `user`).
 
 **IP gate (optional, per server).** An allowlist of Princeton campus and GlobalProtect VPN ranges, taken from [pugwips](https://github.com/PrincetonUniversity/pugwips).
 - **Where the VPN ranges come from, in order:**
@@ -182,6 +185,55 @@ Realms are deactivated, never deleted: `realm.zsh --deactivate <slug>`, with typ
   - IP-gate ranges must be strict IPv4 CIDRs no wider than /8. Downloads from `fallback_url` must be signed.
 - **Sign-up.** A shared server's Entra app admits everyone assigned to it into *every* realm on it. On shared servers, OIDC `auto_signup` therefore defaults to off (invitation only); give a group that needs a separate audience its own server and Entra group.
 - **Proxy trust.** Zulip trusts `X-Forwarded-*` from the whole Container Apps subnet (`LOADBALANCER_IPS`). That subnet includes other apps in the environment, so keep unrelated workloads out of a department's environment.
+
+## Email with Azure Communication Services (optional)
+
+> **Microsoft is retiring ACS Email on 2028-09-30.** Beginning **2026-10-23**, new customers cannot sign up for it; a subscription that already has an ACS resource keeps working until retirement. Treat ACS as a bridge, not a destination. Microsoft's own alternatives are Microsoft 365 **High Volume Email** or Exchange Online, both reachable with `provider: smtp` once the tenant admins provide an account. `render` repeats this warning whenever `provider: acs` is used.
+
+To stop depending on Resend, or keep mail inside the subscription:
+
+```yaml
+email:
+  provider: acs
+  from: donotreply@orfe.princeton.edu   # custom domain: the only sender until a quota increase
+  acs: {domain: orfe.princeton.edu}     # or {domain: azure-managed}, and no `from`
+```
+
+**Sender rules ACS enforces:**
+- Mail can come only from configured senders.
+  - A new custom domain has just `donotreply@`.
+  - Other addresses need Microsoft to approve a sending-quota increase first. Then set `acs.custom_senders: true`, and the platform creates the sender.
+- Zulip also sends some mail From `admin_email`, and ACS rejects that unless it is a configured sender. `render` warns about it.
+- **Quotas:**
+  - A custom domain starts at 30 mails/minute and 100/hour; raise it with an Azure support request (Service and subscription limits) before a large realm goes live.
+  - The Azure-managed domain is fixed at 5/minute and 10/hour, which only works as a stopgap.
+
+1. `deploy-platform.zsh` creates the Email service, the domain, its sender username(s) and the Communication Services resource.
+2. `acs-email.zsh --config orfe`, run by an operator and also by `bootstrap.zsh`:
+   - creates the Entra app whose client secret authenticates SMTP;
+   - grants it Communication and Email Service Owner on the ACS resource;
+   - stores the secret as `email-password`, with its expiry recorded for the keepalive;
+   - creates the SMTP username `<prefix>-smtp`.
+3. **For a custom domain:**
+   - `acs-email.zsh --print` gives OIT the records: domain TXT, SPF, two DKIM CNAMEs, and a recommended DMARC.
+   - Once they exist, `acs-email.zsh --verify --wait 30` verifies them and links the domain. Nothing can be sent from it before that.
+4. Redeploy, then `realm.zsh --send-test-email you@princeton.edu`.
+
+**Choosing the domain:**
+- **Azure-managed** (`DoNotReply@<random>.azurecomm.net`) works with no DNS at all. It has low default sending limits and an unfamiliar sender, so it is best as a stopgap.
+- **Custom domain:** Zulip also sends some mail from `admin_email`, so pick an `admin_email` on the same domain. `render` warns otherwise.
+- **Rotating the secret:** `acs-email.zsh --rotate-secret`, then `update-server.zsh --restart`, then `acs-email.zsh --prune-old-secrets`.
+
+Switching from Resend to ACS or back is a `chat.yml` change plus a redeploy. The only extra step is `acs-email.zsh` when moving to ACS.
+
+## The IP gate is optional, per server and per department
+
+- Servers are ungated by default (`ip_gate: false`).
+- `ip_gate: {enabled: false}` in `chat.yml` drops the gate for the whole department:
+  - no server may turn it on;
+  - no pugwips snapshot, token or refresh is needed;
+  - the snapshot-age checks, the daily refresh and the snapshot PRs all stand down.
+- Without the gate, sign-in is still Entra-only. [docs/edge-protection.md](docs/edge-protection.md) assesses what else stands between a public Zulip and abuse or a DDoS, and what Front Door would add.
 
 ## Monitoring with Healthchecks.io (optional)
 

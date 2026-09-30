@@ -212,13 +212,13 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "provider",
-        "from"
+        "provider"
       ],
       "properties": {
         "provider": {
           "enum": [
             "resend",
+            "acs",
             "smtp"
           ]
         },
@@ -242,6 +242,50 @@
         "user": {
           "type": "string",
           "pattern": "^[A-Za-z0-9._@+-]{1,100}$"
+        },
+        "acs": {
+          "description": "Azure Communication Services Email (provider: acs). domain: a custom domain you can put DNS records in (e.g. orfe.princeton.edu), or azure-managed for Azure's own *.azurecomm.net domain (sender DoNotReply@...). NOTE: Microsoft retires ACS Email on 2028-09-30 and blocks new customers from 2026-10-23.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "domain"
+          ],
+          "properties": {
+            "domain": {
+              "anyOf": [
+                {
+                  "const": "azure-managed"
+                },
+                {
+                  "$ref": "#/$defs/hostname"
+                }
+              ]
+            },
+            "data_location": {
+              "enum": [
+                "United States",
+                "Europe",
+                "UK",
+                "Australia",
+                "Asia Pacific",
+                "Canada",
+                "Japan",
+                "Korea",
+                "Norway",
+                "Switzerland",
+                "France",
+                "Germany",
+                "Africa",
+                "Brazil",
+                "India",
+                "UAE"
+              ]
+            },
+            "custom_senders": {
+              "type": "boolean",
+              "description": "true only after Microsoft approved a sending-quota increase: then email.from may use a local part other than donotreply (a senderUsername is created for it)."
+            }
+          }
         }
       }
     },
@@ -253,6 +297,10 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "false drops the IP gate entirely: no server may set ip_gate, and no pugwips snapshot, token or refresh is needed."
+        },
         "prefix_mode": {
           "enum": [
             "exact",

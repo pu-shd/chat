@@ -182,3 +182,11 @@ def test_absurdly_wide_ranges_are_rejected(run, dept, shims):
     r = emit(run, dept)
     assert r.returncode == 3
     assert "wider than /8" in r.stderr
+
+
+def test_disabled_department_gate_refuses(run, dept, shims):
+    dept.edit(lambda c: (c.update(ip_gate={"enabled": False}), c["servers"]["lab"].pop("ip_gate")))
+    dept.render()
+    r = emit(run, dept)
+    assert r.returncode != 0 and "IP gate is disabled for this department" in r.stderr
+    assert shims.calls() == []

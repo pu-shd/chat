@@ -69,7 +69,11 @@ SERVER_DEFAULTS: dict[str, Any] = {
 EMAIL_PROVIDERS = {
     # Resend SMTP. Azure blocks outbound 25, so 587/STARTTLS.
     "resend": {"host": "smtp.resend.com", "port": 587, "user": "resend"},
+    # Azure Communication Services Email: an Entra app's client secret authenticates, under
+    # an SMTP username resource (acs-email.zsh creates both).
+    "acs": {"host": "smtp.azurecomm.net", "port": 587},
 }
+ACS_MANAGED = "azure-managed"
 # Paths Easy Auth must not intercept, or the mobile/desktop apps, bots, uploads and
 # SCIM stop working. Everything here is reachable anonymously at the Easy Auth layer and
 # is protected by Zulip itself.
@@ -175,14 +179,52 @@ def platform_spec(cfg: dict[str, Any]) -> dict[str, Any]:
     aca_subnet = next(vnet.subnets(new_prefix=23))
     pg_subnet = list(aca_subnet.supernet(new_prefix=22).subnets(new_prefix=24))[2]
     pg_name = names.get("postgres", f"{prefix}-pg")
-    email = dict(EMAIL_PROVIDERS.get(cfg["email"]["provider"], {}))
+    provider = cfg["email"]["provider"]
+    email = {"provider": provider, **EMAIL_PROVIDERS.get(provider, {})}
+    acs = None
+    if provider == "acs":
+        a = cfg["email"].get("acs")
+        if not a:
+            raise ConfigError("email: provider 'acs' needs email.acs.domain (a custom domain, or azure-managed)")
+        managed = a["domain"] == ACS_MANAGED
+        acs = {
+            "email_service": f"{prefix}-email",
+            "communication_service": f"{prefix}-acs",
+            "domain": "AzureManagedDomain" if managed else a["domain"],
+            "managed": managed,
+            "data_location": a.get("data_location", "United States"),
+            "smtp_username_resource": f"{prefix}-smtp",
+            "entra_app": f"{prefix}-acs-smtp",
+        }
+        email["user"] = f"{prefix}-smtp"
+        if managed:
+            if "from" in cfg["email"]:
+                raise ConfigError("email: with acs.domain azure-managed the sender is Azure's DoNotReply@<domain>; drop email.from")
+            email["from"] = "{{acs_mail_from}}"
+        else:
+            frm = cfg["email"].get("from")
+            if not frm or frm.rsplit("@", 1)[1] != a["domain"]:
+                raise ConfigError(f"email: with acs.domain {a['domain']}, email.from must be an address @{a['domain']}")
+            # ACS sends only from configured senders. A new custom domain has just
+            # donotreply@; others need an approved quota increase first.
+            if frm.split("@")[0].lower() != "donotreply" and not a.get("custom_senders"):
+                raise ConfigError(f"email: ACS sends from donotreply@{a['domain']} until Microsoft approves a quota "
+                                  "increase; use that address, or set email.acs.custom_senders: true once approved")
+            email["from"] = frm
+        acs["senders"] = [] if managed or email["from"].split("@")[0].lower() == "donotreply" \
+            else sorted({email["from"].split("@")[0]})
     for key in ("host", "port", "user"):
         if key in cfg["email"]:
+            if provider == "acs":
+                raise ConfigError(f"email.{key} is set by provider 'acs'; remove it")
             email[key] = cfg["email"][key]
     missing = [k for k in ("host", "port", "user") if k not in email]
     if missing:
         raise ConfigError(f"email: provider 'smtp' needs {', '.join(missing)}")
-    email["from"] = cfg["email"]["from"]
+    if provider != "acs":
+        if "from" not in cfg["email"]:
+            raise ConfigError(f"email: provider '{provider}' needs email.from")
+        email["from"] = cfg["email"]["from"]
     email["from_name"] = cfg["email"].get("from_name", f"{cfg['department'].upper()} Chat")
     gate = cfg.get("ip_gate", {})
     return {
@@ -213,8 +255,10 @@ def platform_spec(cfg: dict[str, Any]) -> dict[str, Any]:
         "github": cfg["github"],
         "admin_email": cfg["admin_email"],
         "email": email,
+        "acs": acs,
         "healthchecks": healthchecks_base(cfg),
         "ip_gate": {
+            "enabled": gate.get("enabled", True),
             "prefix_mode": gate.get("prefix_mode", "vendor"),
             "repo": gate.get("repo", "PrincetonUniversity/pugwips"),
             "campus_ranges": gate.get("campus_ranges", DEFAULT_CAMPUS_RANGES),
@@ -297,8 +341,22 @@ def render_config(cfg: dict[str, Any], dept_dir: Path) -> Rendered:
         if servers_cfg[host_server]["kind"] != "dedicated":
             raise ConfigError(f"redirects.host_server '{host_server}' must be a dedicated server")
 
+    if plat["acs"]:
+        warnings.append("email: Microsoft retires ACS Email on 2028-09-30 and blocks new ACS customers from 2026-10-23 "
+                        "(create the resource before then, or choose another provider); plan a move to Resend or M365 "
+                        "High Volume Email (provider: smtp)")
+        if plat["acs"]["managed"]:
+            warnings.append("email: the ACS Azure-managed domain is limited to 5 mails/minute and 10/hour (not raisable); "
+                            "invitations and notifications will be dropped beyond that — use it only as a stopgap")
+        else:
+            warnings.append("email: ACS custom domains start at 30 mails/minute and 100/hour; request an increase "
+                            "(Azure support: Service and subscription limits) before a large realm goes live")
+        if plat["admin_email"] != plat["email"]["from"]:
+            warnings.append(f"email: Zulip sends some mail From admin_email ({plat['admin_email']}); ACS rejects senders "
+                            "that are not configured on its domain, so those messages will fail")
     admin_domain = plat["admin_email"].rsplit("@", 1)[1]
-    from_domain = plat["email"]["from"].rsplit("@", 1)[1]
+    from_domain = (plat["acs"]["domain"] + ".azurecomm.net (Azure-managed)") if plat["acs"] and plat["acs"]["managed"] \
+        else plat["email"]["from"].rsplit("@", 1)[1]
     if admin_domain != from_domain:
         warnings.append(
             f"admin_email is @{admin_domain} but mail is sent as @{from_domain}: Zulip sends some mail "
@@ -364,6 +422,8 @@ def render_config(cfg: dict[str, Any], dept_dir: Path) -> Rendered:
             external_live = ext
             oidc_callback_live = f"https://{auth_host}/complete/oidc/"
 
+        if s["ip_gate"] and not plat["ip_gate"]["enabled"]:
+            raise ConfigError(f"servers.{name}: ip_gate is true but ip_gate.enabled is false for the department")
         if s["ip_gate"]:
             gated_any = True
             if s["dns"] == "live" and "cert" not in s:
@@ -623,11 +683,12 @@ def redirects_conf(spec: dict[str, Any], peers: dict[str, dict[str, Any]], defau
     return "\n".join(lines) + "\n", skipped
 
 
-def resolve_settings(spec, peers, default_domain, oidc_client_id) -> tuple[dict[str, str], list[str]]:
+def resolve_settings(spec, peers, default_domain, oidc_client_id, acs_mail_from=None) -> tuple[dict[str, str], list[str]]:
     fqdn = app_fqdn(spec, default_domain)
     live = spec["dns"] == "live"
     conf, skipped = redirects_conf(spec, peers, default_domain)
     values = {
+        "acs_mail_from": acs_mail_from or "",
         "external_host": spec["external_host_live"] if live else fqdn,
         "oidc_client_id": oidc_client_id,
         "redirects_b64": base64.b64encode(conf.encode()).decode(),
@@ -682,7 +743,11 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         raise ConfigError(f"{spec['name']}: '{client_id}' is not an Entra client id")
     if not args.image or "@sha256:" not in args.image and not args.allow_unpinned_image:
         raise ConfigError("--image must be pinned by digest (name@sha256:...); pass --allow-unpinned-image for local tests")
-    settings, skipped = resolve_settings(spec, peers, args.default_domain, client_id)
+    if "{{acs_mail_from}}" in json.dumps(spec["settings"]) and not args.acs_mail_from:
+        raise ConfigError(f"{spec['name']}: ACS Azure-managed domain: pass --acs-mail-from DoNotReply@<domain>")
+    if args.acs_mail_from and not re.fullmatch(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+", args.acs_mail_from):
+        raise ConfigError(f"--acs-mail-from {args.acs_mail_from!r} is not an address")
+    settings, skipped = resolve_settings(spec, peers, args.default_domain, client_id, args.acs_mail_from)
     for slug in skipped:
         print(f"WARNING: redirect /{slug} omitted: its target is not reachable until DNS is live", file=sys.stderr)
     custom_domains = json.loads(args.custom_domains) if args.custom_domains else []
@@ -776,6 +841,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--custom-domains", help="JSON array of live customDomains to preserve")
     s.add_argument("--ip-rules", help="JSON array of ipSecurityRestrictions")
     s.add_argument("--deploy-app", type=lambda v: v.lower() == "true", default=True)
+    s.add_argument("--acs-mail-from", help="DoNotReply@<Azure-managed domain> (email.acs.domain: azure-managed)")
     s.set_defaults(func=cmd_resolve)
     u = sub.add_parser("urls")
     u.add_argument("dept_dir")

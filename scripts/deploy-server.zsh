@@ -108,11 +108,20 @@ if [[ "$(jqs .ip_gate)" == true ]]; then
   IP_RULES="$("${0:A:h}/ip-gate.zsh" --config "$CONFIG_DIR" --server "$SERVER" --emit | jq -c .)"
 fi
 
+ACS_MAIL_FROM=""
+if [[ "$(jq -r '.acs.managed // false' "$PLATFORM_JSON")" == true ]]; then
+  # Azure-managed ACS domain: the sender is DoNotReply@<generated>.azurecomm.net.
+  ACS_MAIL_FROM="DoNotReply@$(az communication email domain show -g "$RG" --email-service-name "$(jqp .acs.email_service)" \
+    -n "$(jqp .acs.domain)" --query mailFromSenderDomain -o tsv)"
+  [[ "$ACS_MAIL_FROM" == DoNotReply@?*.?* ]] || die "could not read the ACS Azure-managed sender domain; run deploy-platform.zsh"
+fi
+
 params() {  # params <deployApp true|false> -> path of a resolved ARM parameters file
   local f
   f="$(mktemp)"
   local extra=()
   $ALLOW_UNPINNED && extra+=(--allow-unpinned-image)
+  [[ -n "$ACS_MAIL_FROM" ]] && extra+=(--acs-mail-from "$ACS_MAIL_FROM")
   "$CHAT_PY" "$CHAT_RENDER" resolve --server "$SERVER_JSON" --default-domain "$DOMAIN" \
     --image "$IMAGE" --oidc-client-id "$CLIENT_ID" --custom-domains "$CUSTOM_DOMAINS" \
     --ip-rules "$IP_RULES" --deploy-app "$1" "${extra[@]}" > "$f"

@@ -34,6 +34,7 @@ done
 
 load_platform
 load_server
+[[ "$(jqp .ip_gate.enabled)" == true ]] || die "the IP gate is disabled for this department (ip_gate.enabled: false)"
 [[ "$(jqs .ip_gate)" == true ]] || die "servers.$SERVER has ip_gate: false; nothing to do"
 
 PUGWIPS_REPO="$(jqp .ip_gate.repo)"

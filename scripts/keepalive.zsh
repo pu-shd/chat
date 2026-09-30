@@ -9,6 +9,7 @@
 #     certificates renew themselves; a Key Vault certificate is renewed by a person);
 #   * the Entra client secret's expiry (recorded on Key Vault <server>-oidc-secret by
 #     entra-app.zsh): warn under 60 days, fail under 21;
+#   * with email.provider acs, the SMTP client secret's expiry (same thresholds);
 #   * the IP gate's static snapshot age (gated servers): warn past snapshot_max_age_days.
 # Then pings <prefix>-<server>-web on Healthchecks (success, or fail with the reasons).
 # Exits non-zero if any server failed, so the workflow run is red too.
@@ -58,6 +59,17 @@ for srv in "${SERVERS[@]}"; do
   elif days="$("${PROBE[@]}" days-until "$expires" 2>/dev/null)"; then
     if (( days < 21 )); then problems+=("Entra client secret expires in $days days: entra-app.zsh --server $srv --rotate-secret, then update-server.zsh --restart")
     elif (( days < 60 )); then warnings_+=("Entra client secret expires in $days days"); fi
+  fi
+
+  if [[ "$(jqp .email.provider)" == acs ]]; then
+    # ACS SMTP authenticates with an Entra client secret: it expires like the OIDC one.
+    mexp="$(az keyvault secret show --vault-name "$KV_NAME" --name email-password --query attributes.expires -o tsv 2>/dev/null || true)"
+    if [[ -n "$mexp" ]] && days="$("${PROBE[@]}" days-until "$mexp" 2>/dev/null)"; then
+      if (( days < 21 )); then problems+=("ACS SMTP secret expires in $days days: acs-email.zsh --rotate-secret, then restart the servers")
+      elif (( days < 60 )); then warnings_+=("ACS SMTP secret expires in $days days"); fi
+    elif [[ -z "$mexp" ]]; then
+      warnings_+=("email-password has no expiry recorded; rerun acs-email.zsh --rotate-secret to record it")
+    fi
   fi
 
   if [[ "$(jqs .ip_gate)" == true ]]; then

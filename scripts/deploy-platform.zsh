@@ -72,7 +72,14 @@ fi
 log_step "4/5 Deploy infra/platform.bicep"
 PARAMS="$(mktemp)"; chmod 600 "$PARAMS"
 trap 'rm -f "$PARAMS"' EXIT
-kv_secret_get pg-admin-password | jq -Rs --slurpfile p "$PLATFORM_JSON" '{
+ACS_NAME="$(jq -r '.acs.communication_service // empty' "$PLATFORM_JSON")"
+LINKED='[]'
+if [[ -n "$ACS_NAME" ]]; then
+  # Keep domains acs-email.zsh already linked; a redeploy must not unlink them.
+  LINKED="$(az communication show -g "$RG" -n "$ACS_NAME" --query 'linkedDomains' -o json 2>/dev/null || true)"
+  [[ -n "$LINKED" && "$LINKED" != null ]] || LINKED='[]'
+fi
+kv_secret_get pg-admin-password | jq -Rs --slurpfile p "$PLATFORM_JSON" --argjson linked "$LINKED" '{
   "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
   contentVersion: "1.0.0.0",
   parameters: {
@@ -90,7 +97,10 @@ kv_secret_get pg-admin-password | jq -Rs --slurpfile p "$PLATFORM_JSON" '{
     postgresAdminPassword: {value: rtrimstr("\n")},
     postgresSku: {value: $p[0].postgres.sku},
     postgresVersion: {value: $p[0].postgres.version},
-    tags: {value: {"chat-department": $p[0].department}}
+    tags: {value: {"chat-department": $p[0].department}},
+    acs: {value: ($p[0].acs // {})},
+    acsLinkedDomains: {value: $linked},
+    mailFromName: {value: $p[0].email.from_name}
   }}' > "$PARAMS"
 if $DRY_RUN; then
   az deployment group what-if -g "$RG" -n "chat-platform" --template-file "$CHAT_ROOT/infra/platform.bicep" --parameters "@$PARAMS"
@@ -110,3 +120,6 @@ print -r -- "  static inbound IP          : $(print -r -- "$OUT" | jq -r .static
 summary "### Platform \`$RG\`"
 summary "- default domain: \`$DEFAULT_DOMAIN\` — servers are reachable at \`<app>.$DEFAULT_DOMAIN\` before any DNS exists"
 summary "- asuid TXT value for custom domains: \`$VERIFY_ID\`"
+if [[ -n "$ACS_NAME" ]]; then
+  log_info "email: Azure Communication Services $ACS_NAME — next: acs-email.zsh --config $CONFIG_DIR (SMTP credentials; DNS verification for a custom domain)"
+fi

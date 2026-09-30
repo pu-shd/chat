@@ -298,3 +298,84 @@ def test_grant_access_needs_operator_secrets_first(run, dept, shims):
     r = run("grant-access.zsh", "--config", str(dept.path), "--server", "dept")
     assert r.returncode != 0 and "create these first: dept-oidc-secret" in r.stderr
     assert not any(c.startswith("role assignment create") for c in shims.joined("az"))
+
+
+# ---------------------------------------------------------------- acs-email.zsh
+
+
+def acs_dept(dept, domain="orfe.example.edu"):
+    email = {"provider": "acs", "acs": {"domain": domain}}
+    if domain != "azure-managed":
+        email["from"] = f"donotreply@{domain}"
+    dept.edit(lambda c: c.update(email=email))
+    dept.render()
+
+
+def acs_rules(sh, *, states, linked="[]"):
+    az_basics(sh)
+    sh.on("az", r"^communication show -g orfe-chat-rg -n orfe-chat-acs --query id", "/subs/x/acs")
+    sh.on("az", r"^communication show .*linkedDomains", linked)
+    sh.on("az", r"^communication email domain show .* --query id", "/subs/x/email/domains/orfe.example.edu")
+    sh.on("az", r"^communication email domain show ", {
+        "mailFromSenderDomain": "1234abcd.azurecomm.net",
+        "verificationStates": states,
+        "verificationRecords": {"Domain": {"type": "TXT", "name": "orfe.example.edu", "value": "ms-domain-verification=abc", "ttl": 3600},
+                                "SPF": {"type": "TXT", "name": "orfe.example.edu", "value": "v=spf1 include:spf.protection.outlook.com -all", "ttl": 3600},
+                                "DKIM": {"type": "CNAME", "name": "selector1-azurecomm-prod-net._domainkey", "value": "selector1.example", "ttl": 3600}}})
+    sh.on("az", r"^communication email domain initiate-verification ")
+    sh.on("az", r"^communication update ")
+    sh.on("az", r"^ad app list --display-name orfe-chat-acs-smtp", "55555555-5555-5555-5555-555555555555")
+    sh.on("az", r"^ad sp show --id \S+ --query id", "sp-acs")
+    sh.on("az", r"^ad sp show ", "{}")
+    sh.on("az", r"^role assignment list ", "")
+    sh.on("az", r"^role assignment create ")
+    sh.on("az", r"^keyvault secret show .*email-password --query id", exit=3, times=1)
+    sh.on("az", r"^keyvault secret show-deleted ", exit=3)
+    sh.on("az", r"^ad app credential reset ", {"password": "ACS-SECRET-1", "end": "2028-09-30T00:00:00Z"})
+    sh.on("az", r"^keyvault secret set ")
+    sh.on("az", r"^communication smtp-username show ", exit=3)
+    sh.on("az", r"^communication smtp-username create ")
+
+
+V = {"Domain": {"status": "Verified"}, "SPF": {"status": "Verified"}, "DKIM": {"status": "Verified"},
+     "DKIM2": {"status": "Verified"}, "DMARC": {"status": "NotStarted"}}
+
+
+def test_acs_print_writes_the_dns_ticket(run, dept, shims):
+    acs_dept(dept)
+    acs_rules(shims, states={})
+    r = run("acs-email.zsh", "--config", str(dept.path), "--print")
+    assert r.returncode == 0, r.stderr
+    assert "| TXT | `orfe.example.edu` | `ms-domain-verification=abc` | 3600 |" in r.stdout
+    assert "| CNAME | `selector1-azurecomm-prod-net._domainkey` |" in r.stdout
+    assert "_dmarc.orfe.example.edu" in r.stdout
+    assert not any(c.startswith(("ad app", "role assignment")) for c in shims.joined("az"))
+
+
+def test_acs_unverified_domain_is_not_linked_but_credentials_are_made(run, dept, shims):
+    acs_dept(dept)
+    acs_rules(shims, states={**V, "DKIM2": {"status": "NotStarted"}})
+    r = run("acs-email.zsh", "--config", str(dept.path))
+    assert r.returncode == 0, r.stderr
+    assert "not verified yet (DKIM2)" in r.stderr
+    calls = shims.joined("az")
+    assert not any(c.startswith("communication update") for c in calls)
+    assert any("--role Communication and Email Service Owner --scope /subs/x/acs" in c for c in calls)
+    assert any(c.startswith("communication smtp-username create -g orfe-chat-rg --comm-service-name orfe-chat-acs -n orfe-chat-smtp "
+                            "--username orfe-chat-smtp --entra-application-id 55555555-5555-5555-5555-555555555555") for c in calls)
+    secret = next(c for c in shims.calls("az") if c["args"][:3] == ["keyvault", "secret", "set"])
+    assert secret["file"] == "ACS-SECRET-1" and "--expires" in secret["args"]
+    assert not any("ACS-SECRET-1" in a for c in shims.calls() for a in c["args"])
+
+
+def test_acs_verified_domain_gets_linked(run, dept, shims):
+    acs_dept(dept)
+    acs_rules(shims, states=V)
+    r = run("acs-email.zsh", "--config", str(dept.path))
+    assert r.returncode == 0, r.stderr
+    assert 'communication update -g orfe-chat-rg -n orfe-chat-acs --linked-domains ["/subs/x/email/domains/orfe.example.edu"] --output none' in shims.joined("az")
+
+
+def test_acs_refuses_without_acs_provider(run, dept, shims):
+    r = run("acs-email.zsh", "--config", str(dept.path))
+    assert r.returncode != 0 and "email.provider is not acs" in r.stderr
