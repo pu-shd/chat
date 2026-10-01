@@ -13,7 +13,7 @@ environment's default domain, the Entra client id when it lives in Key Vault, th
 hostnames already bound, the IP rules already applied) is left as a {{placeholder}} and
 filled by `resolve` at deploy time.
 
-DNS: a server is `dns: pending` until OIT has created its CNAMEs. While pending it is
+DNS: a server is `dns: pending` until its CNAMEs exist. While pending it is
 served on its own *.azurecontainerapps.io name, which Azure already covers with TLS, so
 an instance can be deployed, signed into and tested before any DNS exists. Flipping it
 to `live` switches EXTERNAL_HOST (and, on a shared server, the realm hosts and the OIDC

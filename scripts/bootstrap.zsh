@@ -30,7 +30,7 @@
 #   servers      deploy-server.zsh per server (groups first, the redirect host last)
 #   healthchecks healthchecks.zsh --sync (when enabled and an API key exists)
 #   smoke        smoke.zsh per server
-#   dns          the DNS request for OIT, written to dns-request-<dept>.md
+#   dns          the DNS request, written to dns-request-<dept>.md
 #
 # No DNS is needed for any of it: with dns: pending (the default) every server answers on
 # https://<app>.<environment default domain>/, sign-in included.
@@ -50,7 +50,7 @@ DESC=(
   servers      "deploy every server (the redirect host last)"
   healthchecks "create/tune the Healthchecks checks"
   smoke        "check every reachable realm, Entra sign-in and the redirects"
-  dns          "write the DNS request for OIT"
+  dns          "write the DNS request"
 )
 
 FROM="" ONLY="" IMAGE="${CHAT_IMAGE:-}" SET_GH_VARS=false STEPWISE=false MODE="" INTERNAL_STEP=""
@@ -298,7 +298,7 @@ step_dns() {
       "$S/acs-email.zsh" --config "$CONFIG_DIR" --print
     fi
   } > "$out_file"
-  log_ok "wrote $out_file — send it to OIT (hostmaster) to create the records"
+  log_ok "wrote $out_file — send it to your DNS administrators to create the records"
 }
 
 # ------------------------------------------------------------------ servers in scope
@@ -447,7 +447,7 @@ ${_b}Next${_o}
   * Sign in at the "now" URLs above with your Princeton account. Each realm's owner in
     chat.yml has full rights there on first sign-in (see "Accounts and roles" in the README).
   * Commit and push the config repo; CI now deploys every change to chat.yml.
-  * When OIT has created the records in dns-request-$DEPT.md, for each server:
+  * When the records in dns-request-$DEPT.md exist, for each server:
       $S/bind-domain.zsh --config $CONFIG_DIR --server <name> --wait 30
     then set dns: live for it in chat.yml, render, rerun entra-app.zsh, commit and push.
 EOT

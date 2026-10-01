@@ -41,7 +41,7 @@ What protects a public Zulip server here once `ip_gate` is off, and whether Azur
    - The custom domain must stay bound on the Container App with a certificate that Front Door validates.
    - Once public DNS points at Front Door, an ACA **managed** certificate can no longer be issued or renewed, so bind a **Key Vault certificate** on the app (the `cert.key_vault_certificate` path gated servers already use).
    - Front Door gets its own managed certificate for the same names.
-   - The DNS records OIT holds change from `CNAME → <app>.<env domain>` to `CNAME → <endpoint>.azurefd.net`, plus Front Door's own `_dnsauth` TXT validation record.
+   - The DNS records change from `CNAME → <app>.<env domain>` to `CNAME → <endpoint>.azurefd.net`, plus Front Door's own `_dnsauth` TXT validation record.
 5. **Real client IPs.** Zulip must trust `X-Forwarded-For` from Front Door's ranges as well as from the environment subnet, or its per-IP rate limits will see Front Door instead of users.
 
 ## Recommendation

@@ -119,7 +119,7 @@ The steps:
 | `servers` | `deploy-server.zsh` | per server; the redirect host goes last |
 | `healthchecks` | `healthchecks.zsh --sync` | when enabled and an API key exists: creates the checks with their schedules |
 | `smoke` | `smoke.zsh` | realm answers, Entra redirect, `/<slug>` redirects |
-| `dns` | `bind-domain.zsh --print` | writes `dns-request-<dept>.md`, the ticket for OIT |
+| `dns` | `bind-domain.zsh --print` | writes `dns-request-<dept>.md`, the request for your DNS administrators |
 
 Before the first bootstrap, cut a template release (`git tag vX.Y.Z && git push --tags`). Copy the release's `template.lock` asset (ref and commit sha) into the config repo, and pin its `uses:` lines to that sha. The weekly Update check does this for later releases.
 
@@ -163,7 +163,7 @@ scripts/local.zsh status | logs | trust | down
 - Ports 443, 9080 and 8025 on 127.0.0.1 must be free. `up` is idempotent and keeps data. `down` deletes it.
 - Not reproduced locally: the IP gate, Easy Auth, Healthchecks and Azure networking. The shared server's realms each get their own `<slug>.….localhost` host.
 
-## Going live: CNAMEs for OIT
+## Going live: CNAMEs for DNS
 
 ```zsh
 .chat-template/scripts/bind-domain.zsh --config <dept> --server dept --print   # ticket text
@@ -184,9 +184,9 @@ Each hostname needs two records. The values come from the platform, so the ticke
 - **Each group realm:** `<slug>.chat.<dept>.princeton.edu` → the `groups` app, or → its own app if the group has a dedicated server.
 - `chat.<dept>.princeton.edu/<slug>` needs no DNS; it is a redirect.
 
-**Once OIT confirms the records, for each server:**
+**Once your DNS administrators confirm the records, for each server:**
 1. `bind-domain.zsh --config <dept> --server <name> --wait 30` checks the records, then binds each hostname with a free managed certificate.
-   - A server with `ip_gate: true` cannot use a managed certificate, because DigiCert must reach the app. Give it `cert: {key_vault_certificate: <name>}`, for example an OIT/InCommon certificate imported into Key Vault.
+   - A server with `ip_gate: true` cannot use a managed certificate, because DigiCert must reach the app. Give it `cert: {key_vault_certificate: <name>}`, for example an InCommon certificate imported into Key Vault.
 2. Set `dns: live` for that server in `chat.yml`, then `render`.
 3. Run `entra-app.zsh --config <dept> --server <name>` to add the live callback URL. The preview URL is kept until `--prune-redirects`.
 4. Commit and push. CI redeploys and Zulip's `EXTERNAL_HOST` switches to the real name.
@@ -197,7 +197,7 @@ Each hostname needs two records. The values come from the platform, so the ticke
 - **Realm on the shared server:** append it to `servers.groups.realms` in `chat.yml`, render, then commit and push.
   - CI deploys, and the `-mgmt` job creates the realm with its owner.
   - The owner signs in with Entra.
-  - Then ask OIT for `<slug>.chat.<dept>.princeton.edu` (see `bind-domain.zsh --print`).
+  - Then ask your DNS administrators for `<slug>.chat.<dept>.princeton.edu` (see `bind-domain.zsh --print`).
 - **Dedicated server:** add a `kind: dedicated` server with `host: <slug>.chat.<dept>.princeton.edu` and `slug: <slug>`.
   - Run `entra-app.zsh` and `grant-access.zsh` for it once, then push.
   - The department server's `/<slug>` redirect follows automatically.
@@ -296,7 +296,7 @@ email:
    - stores the secret as `email-password`, with its expiry recorded for the keepalive;
    - creates the SMTP username `<prefix>-smtp`.
 3. **For a custom domain:**
-   - `acs-email.zsh --print` gives OIT the records: domain TXT, SPF, two DKIM CNAMEs, and a recommended DMARC.
+   - `acs-email.zsh --print` gives your DNS administrators the records: domain TXT, SPF, two DKIM CNAMEs, and a recommended DMARC.
    - Once they exist, `acs-email.zsh --verify --wait 30` verifies them and links the domain. Nothing can be sent from it before that.
 4. Redeploy, then `realm.zsh --send-test-email you@princeton.edu`.
 

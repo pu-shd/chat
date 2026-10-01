@@ -253,5 +253,5 @@ summary "### $SERVER deployed"
 summary "- revision \`$REVISION\`, image \`$IMAGE\`"
 summary "- app FQDN (works before DNS): https://$FQDN/"
 if [[ "$(jqs .dns)" == pending ]]; then
-  summary "- dns: **pending** — when OIT has created the records from \`bind-domain.zsh --print\`, bind them and set \`dns: live\`"
+  summary "- dns: **pending** — when the records from \`bind-domain.zsh --print\` exist, bind them and set \`dns: live\`"
 fi

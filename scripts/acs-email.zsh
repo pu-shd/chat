@@ -7,7 +7,7 @@
 #
 # The platform (deploy-platform.zsh) creates the Email service, the domain, its sender
 # usernames and the Communication Services resource. This script:
-#   * custom domain: --print writes the DNS records for OIT (domain TXT, SPF, DKIM x2,
+#   * custom domain: --print writes the DNS records to request (domain TXT, SPF, DKIM x2,
 #     plus a recommended DMARC); --verify asks Azure to check them and, once all are
 #     verified, links the domain to the Communication Services resource. Mail cannot be
 #     sent from a custom domain before that;
@@ -93,7 +93,7 @@ if [[ "$MANAGED" != true ]]; then
     done
   fi
   if (( ${#unverified} )); then
-    gh_warning "email: $DOMAIN not verified yet (${unverified[*]}); mail cannot be sent from it. Send OIT the records from --print, then rerun with --verify"
+    gh_warning "email: $DOMAIN not verified yet (${unverified[*]}); mail cannot be sent from it. Send your DNS administrators the records from --print, then rerun with --verify"
   else
     log_ok "$DOMAIN verified"
     linked="$(az communication show -g "$RG" -n "$CS" --query 'linkedDomains' -o json)"

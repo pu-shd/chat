@@ -87,5 +87,5 @@ fi
 
 APP_REG="$(az ad app list --display-name "$PREFIX-$SERVER-zulip" --query '[0].appId' -o tsv 2>/dev/null || true)"
 [[ -n "$APP_REG" ]] && print -u2 -r -- "Entra app registration kept. To remove it: az ad app delete --id $APP_REG"
-print -u2 -r -- "If $SERVER had DNS records, ask OIT to remove: $(jq -r '.hosts | join(", ")' "$SERVER_JSON")"
+print -u2 -r -- "If $SERVER had DNS records, ask your DNS administrators to remove: $(jq -r '.hosts | join(", ")' "$SERVER_JSON")"
 summary "- teardown $SERVER ($($PURGE && print purge || print preserve)) complete"

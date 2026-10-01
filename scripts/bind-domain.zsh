@@ -1,8 +1,8 @@
 #!/usr/bin/env zsh
-# bind-domain.zsh — custom hostnames for one server, before and after OIT creates DNS.
+# bind-domain.zsh — custom hostnames for one server, before and after the DNS records exist.
 #
 #   scripts/bind-domain.zsh --config <dept-dir> --server <name> --print
-#       The DNS request for OIT (CNAME + asuid TXT per hostname), as Markdown. Works as
+#       The DNS request (CNAME + asuid TXT per hostname), as Markdown. Works as
 #       soon as the platform exists — no app or DNS needed — so the ticket can go in
 #       while you test on the *.azurecontainerapps.io name.
 #   scripts/bind-domain.zsh --config <dept-dir> --server <name> [--wait MINUTES] [--host H]
@@ -83,7 +83,7 @@ while true; do
   if (( $(date +%s) >= deadline )); then
     log_error "DNS not in place yet for: ${missing[*]}"
     print -u2 -r -- "Expected for each: CNAME → $TARGET and TXT asuid.<host> → $VERIFY_ID"
-    print -u2 -r -- "Print the request for OIT with: $0 --config $CONFIG_DIR --server $SERVER --print"
+    print -u2 -r -- "Print the DNS request with: $0 --config $CONFIG_DIR --server $SERVER --print"
     exit 4
   fi
   log_info "waiting for DNS: ${missing[*]}"
