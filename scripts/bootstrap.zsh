@@ -3,7 +3,8 @@
 #
 #   scripts/bootstrap.zsh --config <config-repo>/<dept>
 #       [--resume | --restart] [--from STEP] [--only STEP] [--step-by-step]
-#       [--server NAME ...] [--image <registry>/chat@sha256:...] [--set-gh-vars] [--yes]
+#       [--server NAME ...] [--image <registry>/chat@sha256:...]
+#       [--set-gh-vars [--admin-reviewer LOGIN ...]] [--yes]
 #
 # Every step is idempotent, so running it again is always safe. Each run records what
 # finished in <config repo>/.chat-bootstrap/<dept>.state (gitignored), so it can resume:
@@ -23,7 +24,8 @@
 #   image        build-image.zsh — Zulip image built in the registry from template.lock's
 #                commit (this checkout must be that commit); sidecar images imported
 #   github       setup-github-oidc.zsh — CI identity (+ repo protection, environments and
-#                variables with --set-gh-vars)
+#                variables with --set-gh-vars; --admin-reviewer: teardown approvers, two
+#                or more, since nobody may approve their own)
 #   secrets      mail credentials (Resend key or ACS), Healthchecks keys, PUGWIPS_READ_TOKEN
 #   entra        entra-app.zsh per server — Zulip sign-in app registration
 #   access       grant-access.zsh per server — identities, per-secret Key Vault access, AcrPull
@@ -54,7 +56,7 @@ DESC=(
 )
 
 FROM="" ONLY="" IMAGE="${CHAT_IMAGE:-}" SET_GH_VARS=false STEPWISE=false MODE="" INTERNAL_STEP=""
-typeset -a ONLY_SERVERS
+typeset -a ONLY_SERVERS ADMIN_REVIEWERS
 parse_common_args "$@"
 set -- "${CHAT_ARGS_REST[@]}"
 while (( $# )); do
@@ -64,6 +66,7 @@ while (( $# )); do
     --only) ONLY="${2:?}"; shift 2 ;;
     --server-only|--servers) ONLY_SERVERS+=("${2:?}"); shift 2 ;;
     --set-gh-vars) SET_GH_VARS=true; shift ;;
+    --admin-reviewer) ADMIN_REVIEWERS+=("${2:?--admin-reviewer needs a GitHub login}"); shift 2 ;;
     --step-by-step|-i) STEPWISE=true; shift ;;
     --resume) MODE=resume; shift ;;
     --restart) MODE=restart; shift ;;
@@ -72,6 +75,7 @@ while (( $# )); do
   esac
 done
 [[ -n "$SERVER" ]] && ONLY_SERVERS+=("$SERVER")
+(( ${#ADMIN_REVIEWERS} == 0 )) || $SET_GH_VARS || die "--admin-reviewer only applies with --set-gh-vars"
 for s in "$FROM" "$ONLY"; do
   [[ -z "$s" || ${STEPS[(Ie)$s]} -gt 0 ]] || die "unknown step '$s' (steps: ${STEPS[*]})"
 done
@@ -177,6 +181,7 @@ step_image() { "$S/build-image.zsh" --config "$CONFIG_DIR" >/dev/null; }
 step_github() {
   local gh_args=()
   if $SET_GH_VARS; then gh_args+=(--set-gh-vars); fi
+  for r in "${ADMIN_REVIEWERS[@]}"; do gh_args+=(--admin-reviewer "$r"); done
   "$S/setup-github-oidc.zsh" --config "$CONFIG_DIR" "${YES[@]}" "${gh_args[@]}"
 }
 step_secrets() {
@@ -373,6 +378,7 @@ typeset -a CHILD
 CHILD=(--config "$CONFIG_DIR" "${YES[@]}")
 if [[ -n "$IMAGE" ]]; then CHILD+=(--image "$IMAGE"); fi
 if $SET_GH_VARS; then CHILD+=(--set-gh-vars); fi
+for r in "${ADMIN_REVIEWERS[@]}"; do CHILD+=(--admin-reviewer "$r"); done
 for s in "${ONLY_SERVERS[@]}"; do CHILD+=(--servers "$s"); done
 
 # ------------------------------------------------------------------ run

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import ROOT, az_basics
+from conftest import ME, NOT_FOUND, ROOT, az_basics, entra_app
 
 DOMAIN = "happy-sea-123.canadacentral.azurecontainerapps.io"
 REGISTRY = "orfechatacr.azurecr.io"
@@ -54,22 +54,22 @@ def deploy_rules(sh, *, live_image=OLD_IMAGE, missing=(), custom_domains=None, n
     sh.on("az", r"^acr show -n orfechatacr -g orfe-chat-rg --query id", "/subs/x/registries/orfechatacr")
     sh.on("az", r"^containerapp env show -g orfe-chat-rg -n orfe-chat-env --query id", "/env")
     for name in missing:
-        sh.on("az", rf"^keyvault secret show --vault-name orfe-chat-kv --name {name} --query id", exit=3)
+        sh.on("az", rf"^keyvault secret show --vault-name orfe-chat-kv --name {name} --query id", **NOT_FOUND)
+    sh.on("az", r"^keyvault secret show --vault-name orfe-chat-kv --name dept-custom-domains", **NOT_FOUND)
     sh.on("az", r"^keyvault secret show --vault-name orfe-chat-kv --name \S+ --query id", "https://kv/secret")
-    sh.on("az", r"^keyvault secret show-deleted ", exit=3)
+    sh.on("az", r"^keyvault secret show-deleted ", **NOT_FOUND)
     sh.on("az", r"^keyvault secret set ")
-    sh.on("az", r"^keyvault secret show --vault-name orfe-chat-kv --name dept-custom-domains", exit=3)
     sh.on("az", r"^keyvault show -n orfe-chat-kv ", "/subs/x/vaults/orfe-chat-kv")
     for ident in no_identity:
-        sh.on("az", rf"^identity show -g orfe-chat-rg -n {ident} ", exit=3)
+        sh.on("az", rf"^identity show -g orfe-chat-rg -n {ident} ", **NOT_FOUND)
     sh.on("az", r"^identity show -g orfe-chat-rg -n \S+ --query principalId", "pid-1")
     for secret in no_access:
         sh.on("az", rf"^role assignment list .*--scope /subs/x/vaults/orfe-chat-kv/secrets/{secret} ", "")
     sh.on("az", r"^role assignment list ", "/ra/1")
-    sh.on("az", r"^containerapp job show ", exit=3)
+    sh.on("az", r"^containerapp job show ", **NOT_FOUND)
     sh.on("az", r"^containerapp env show .*defaultDomain", DOMAIN)
     if live_image is None:
-        sh.on("az", r"^containerapp show -g orfe-chat-rg -n orfe-chat-dept --query id", exit=3)
+        sh.on("az", r"^containerapp show -g orfe-chat-rg -n orfe-chat-dept --query id", **NOT_FOUND)
     else:
         sh.on("az", r"^containerapp show -g orfe-chat-rg -n orfe-chat-dept --query id", "/app")
         sh.on("az", r"^containerapp show -g orfe-chat-rg -n orfe-chat-dept -o json", {"properties": {
@@ -85,11 +85,11 @@ def deploy_rules(sh, *, live_image=OLD_IMAGE, missing=(), custom_domains=None, n
           'noise\nCHAT-RESULT: {"ok": true, "database": "zulip_dept", "collation": "C.UTF-8"}')
     sh.on("az", r"^containerapp job logs show --name orfe-chat-dept-mgmt ",
           f'CHAT-RESULT: {{"ok": true, "slug": "", "created": true, "url": "https://orfe-chat-dept.{DOMAIN}"}}')
-    sh.on("az", r"^monitor log-analytics workspace show", exit=3)
+    sh.on("az", r"^monitor log-analytics workspace show", **NOT_FOUND)
     sh.on("az", r"^containerapp revision list .*properties\.active", "orfe-chat-dept--r1")
     sh.on("az", r"^containerapp revision deactivate ")
     sh.on("az", r"^containerapp revision show ", "Healthy\tRunning")
-    sh.on("az", r"^containerapp auth show ", exit=3)
+    sh.on("az", r"^containerapp auth show ", **NOT_FOUND)
     return sh
 
 
@@ -158,12 +158,19 @@ def test_deploy_refuses_without_least_privilege_access(run, dept, shims):
 
 def test_deploy_restores_bindings_saved_at_teardown(run, dept, shims):
     saved = [{"name": "chat.orfe.example.edu", "bindingType": "SniEnabled", "certificateId": "/c"}]
+    shims.on("az", r"^keyvault secret show --vault-name orfe-chat-kv --name dept-custom-domains --query id", "id")
     shims.on("az", r"^keyvault secret show --vault-name orfe-chat-kv --name dept-custom-domains --query value", json.dumps(saved))
     deploy_rules(shims, live_image=None)
     r = deploy(run, dept)
     assert r.returncode == 0, r.stderr
     app_call = next(c for c in shims.calls("az") if "chat-dept-app" in " ".join(c["args"]))
     assert json.loads(next(iter(app_call["at_files"].values())))["parameters"]["customDomains"]["value"] == saved
+    # Once the app holds them again, the saved copy is cleared (an old save must not
+    # resurrect bindings removed later) — only after the revision is healthy.
+    sets = [c for c in shims.calls("az") if c["args"][:3] == ["keyvault", "secret", "set"]]
+    assert [(c["args"][c["args"].index("--name") + 1], c["file"]) for c in sets] == [("dept-custom-domains", "[]")]
+    calls = shims.joined("az")
+    assert index_of(calls, "revision show") < index_of(calls, "--name dept-custom-domains --file")
 
 
 def test_deploy_rejects_a_result_for_the_wrong_database(run, dept, shims):
@@ -225,7 +232,7 @@ def test_failed_dbinit_stops_the_deploy(run, dept, shims):
 
 def test_job_without_result_line_is_a_failure(run, dept, shims):
     shims.on("az", r"^containerapp job logs show --name orfe-chat-dept-dbinit ", "all good, probably")
-    shims.on("az", r"^monitor log-analytics workspace show", exit=3)
+    shims.on("az", r"^monitor log-analytics workspace show", **NOT_FOUND)
     deploy_rules(shims)
     r = deploy(run, dept, env={"JOB_LOG_TRIES": "1"})
     assert r.returncode != 0 and "reported no CHAT-RESULT" in r.stderr
@@ -263,11 +270,18 @@ def test_teardown_preserve_keeps_data(run, dept, shims):
     shims.on("az", r"^containerapp delete ")
     shims.on("az", r"^containerapp job show ", "{}")
     shims.on("az", r"^containerapp job delete ")
+    shims.on("az", r"^containerapp show -g orfe-chat-rg -n orfe-chat-dept --query properties\.configuration\.ingress\.customDomains", "[]")
+    shims.on("az", r"^keyvault secret show-deleted ", **NOT_FOUND)
+    shims.on("az", r"^keyvault secret set ")
     shims.on("az", r"^ad app list ", "")
     r = run("teardown-server.zsh", "--config", str(dept.path), "--server", "dept",
             env={"CHAT_CONFIRM": "CONFIRM-DELETE dept"})
     assert r.returncode == 0, r.stderr
     calls = shims.joined("az")
+    # No bindings is saved too, so an older save cannot resurrect bindings at the next deploy.
+    saved = [c for c in shims.calls("az") if c["args"][:3] == ["keyvault", "secret", "set"]]
+    assert [(c["args"][c["args"].index("--name") + 1], c["file"]) for c in saved] == [("dept-custom-domains", "[]")]
+    assert index_of(calls, "--name dept-custom-domains --file") < index_of(calls, "containerapp delete")
     assert any(c.startswith("containerapp delete -g orfe-chat-rg -n orfe-chat-dept ") for c in calls)
     assert any("job delete -g orfe-chat-rg -n orfe-chat-dept-mgmt" in c for c in calls)
     assert not any(s in c for c in calls for s in ("dbinit --yes", "share-rm", "secret delete", "DB_ACTION"))
@@ -275,7 +289,7 @@ def test_teardown_preserve_keeps_data(run, dept, shims):
 
 def test_teardown_purge_drops_database_first(run, dept, shims):
     az_basics(shims)
-    shims.on("az", r"^containerapp show -g orfe-chat-rg -n orfe-chat-dept --query id", exit=3)
+    shims.on("az", r"^containerapp show -g orfe-chat-rg -n orfe-chat-dept --query id", **NOT_FOUND)
     shims.on("az", r"^containerapp job show ", "{}")
     shims.on("az", r"^containerapp job delete ")
     shims.on("az", r"^containerapp job start .*--env-vars DB_ACTION=drop", "exec-drop")
@@ -285,10 +299,10 @@ def test_teardown_purge_drops_database_first(run, dept, shims):
     shims.on("az", r"^storage share-rm (show|delete) ")
     shims.on("az", r"^identity show ", "{}")
     shims.on("az", r"^identity delete ")
-    shims.on("az", r"^keyvault secret show-deleted ", exit=3)
+    shims.on("az", r"^keyvault secret show-deleted ", **NOT_FOUND)
     shims.on("az", r"^keyvault secret show .* --query id", "id")
     shims.on("az", r"^keyvault secret delete ")
-    shims.on("az", r"^ad app list ", "33333333-3333-3333-3333-333333333333")
+    entra_app(shims, "orfe-chat-dept-zulip", "33333333-3333-3333-3333-333333333333")
     r = run("teardown-server.zsh", "--config", str(dept.path), "--server", "dept", "--purge",
             env={"CHAT_CONFIRM": "PURGE dept"})
     assert r.returncode == 0, r.stderr
@@ -360,17 +374,17 @@ def test_gated_server_refuses_managed_certificate(run, dept, shims):
 def test_entra_app_sets_pre_dns_and_live_redirects_and_vaults_secret(run, dept, shims):
     az_basics(shims)
     cid = "22222222-2222-2222-2222-222222222222"
-    shims.on("az", r"^ad app list --display-name orfe-chat-groups-zulip", cid)
+    entra_app(shims, "orfe-chat-groups-zulip", cid)
     shims.on("az", r"^containerapp env show .*defaultDomain", DOMAIN)
     shims.on("az", r"^ad app show --id .* web\.redirectUris", "")
     shims.on("az", r"^ad app update ")
     shims.on("az", r"^ad sp show --id \S+ --query id", "sp-object-id")
     shims.on("az", r"^ad sp show --id ", "{}")
     shims.on("az", r"^ad sp update ")
-    shims.on("az", r"^keyvault secret show .*groups-oidc-secret --query id", exit=3)
+    shims.on("az", r"^keyvault secret show .*groups-oidc-secret --query id", **NOT_FOUND)
     shims.on("az", r"^ad app credential reset ", {"password": "S3CRET-VALUE-9", "end": "2028-09-30T12:00:00Z"})
     shims.on("az", r"^keyvault secret set ")
-    shims.on("az", r"^keyvault secret show .*groups-oidc-client-id --query value", exit=3)
+    shims.on("az", r"^keyvault secret show .*groups-oidc-client-id --query value", **NOT_FOUND)
     r = run("entra-app.zsh", "--config", str(dept.path), "--server", "groups")
     assert r.returncode == 0, r.stderr
     upd = next(c for c in shims.joined("az") if "--web-redirect-uris" in c)
@@ -388,7 +402,7 @@ def test_entra_app_sets_pre_dns_and_live_redirects_and_vaults_secret(run, dept, 
 
 def test_entra_app_refuses_mismatched_pinned_client_id(run, dept, shims):
     az_basics(shims)
-    shims.on("az", r"^ad app list --display-name orfe-chat-dept-zulip", "99999999-9999-9999-9999-999999999999")
+    entra_app(shims, "orfe-chat-dept-zulip", "99999999-9999-9999-9999-999999999999")
     r = run("entra-app.zsh", "--config", str(dept.path), "--server", "dept")
     assert r.returncode != 0 and "pins entra.client_id=11111111" in r.stderr
 
@@ -509,7 +523,7 @@ def test_default_image_is_the_locked_tag_in_the_registry(run, dept, shims, tmp_p
 def test_unbuilt_image_stops_the_deploy(run, dept, shims, tmp_path):
     lock = tmp_path / "template.lock"
     lock.write_text(json.dumps({"repo": "pu-shd/chat", "ref": "v0.3.0", "sha": "abcdef1" + "0" * 33}))
-    shims.on("az", r"^acr repository show ", exit=3)
+    shims.on("az", r"^acr repository show ", **NOT_FOUND)
     deploy_rules(shims)
     r = run("deploy-server.zsh", "--config", str(dept.path), "--server", "dept", "--lock", str(lock))
     assert r.returncode != 0 and "chat:v0.3.0-abcdef1 is not built yet" in r.stderr

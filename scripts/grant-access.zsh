@@ -4,9 +4,10 @@
 #
 #   scripts/grant-access.zsh --config <dept> --server <name>
 #
-# Creates the server's two managed identities if missing —
-#   <app>-id     the Zulip app, its -mgmt and -hc jobs
+# Creates the server's managed identities if missing —
+#   <app>-id     the Zulip app and its -mgmt job
 #   <app>-db-id  only the -dbinit job
+#   <app>-hc-id  only the -hc pinger (when healthchecks are enabled: identities.hc)
 # — generates the server's random secrets if missing (never replacing one), then grants
 # each identity Key Vault Secrets User on exactly the secrets listed for it in
 # generated/servers/<name>.json, and AcrPull on the department registry. Nothing gets
@@ -28,25 +29,29 @@ log_step "Secrets for $SERVER"
 for s in secret-key postgres-password redis-password rabbitmq-password memcached-password; do
   kv_secret_ensure_random "$SERVER-$s"
 done
+# Every identity the server JSON lists: app, db, and hc when healthchecks are enabled.
+KINDS=("${(@f)$(jqs '.identities | keys[]')}")
 missing=()
-for kind in app db; do
+for kind in "${KINDS[@]}"; do
   for s in "${(@f)$(jqs ".identities.$kind.secrets[]")}"; do
+    [[ -n "$s" ]] || continue  # never a scope of the whole vault
     kv_secret_exists "$s" || missing+=("$s")
   done
 done
 missing=("${(@u)missing}")
 (( ${#missing} == 0 )) || die "create these first: ${(j:, :)missing} (email-password: bootstrap.zsh --only secrets; $SERVER-oidc-secret: entra-app.zsh; healthchecks-ping-key: bootstrap.zsh --only secrets)"
 
-for kind in app db; do
+for kind in "${KINDS[@]}"; do
   name="$(jqs ".identities.$kind.name")"
   log_step "Identity $name"
-  if ! az identity show -g "$RG" -n "$name" >/dev/null 2>&1; then
+  if ! az_exists identity show -g "$RG" -n "$name" --query id -o tsv; then
     az identity create -g "$RG" -n "$name" -l "$LOCATION" --tags "chat-server=$SERVER" --output none
     log_ok "created"
   fi
   pid="$(az identity show -g "$RG" -n "$name" --query principalId -o tsv)"
   [[ -n "$pid" ]] || die "$name has no principal id"
   for s in "${(@f)$(jqs ".identities.$kind.secrets[]")}"; do
+    [[ -n "$s" ]] || continue  # never a scope of the whole vault
     scope="$KV_ID/secrets/$s"
     if [[ -n "$(az role assignment list --assignee "$pid" --scope "$scope" --role "$ROLE" --query '[0].id' -o tsv 2>/dev/null)" ]]; then
       log_ok "$s: already granted"
@@ -62,10 +67,10 @@ for kind in app db; do
     fi
   done
 done
-# Both identities pull their images from the department registry.
+# Every identity pulls its images from the department registry.
 ACR_ID="$(az acr show -n "$(jqp .names.registry)" -g "$RG" --query id -o tsv)"
 [[ -n "$ACR_ID" ]] || die "registry $(jqp .names.registry) not found; run deploy-platform.zsh first"
-for kind in app db; do
+for kind in "${KINDS[@]}"; do
   name="$(jqs ".identities.$kind.name")"
   pid="$(az identity show -g "$RG" -n "$name" --query principalId -o tsv)"
   if [[ -n "$(az role assignment list --assignee "$pid" --scope "$ACR_ID" --role AcrPull --query '[0].id' -o tsv 2>/dev/null)" ]]; then
@@ -80,4 +85,4 @@ for kind in app db; do
     log_ok "$name: AcrPull granted"
   fi
 done
-summary "- access for $SERVER: $(jqs '.identities.app.secrets | length') secrets for the app, $(jqs '.identities.db.secrets | length') for dbinit"
+summary "- access for $SERVER: $(jq -r '[.identities | to_entries[] | "\(.value.secrets | length) secret(s) for \(.key)"] | join(", ")' "$SERVER_JSON")"

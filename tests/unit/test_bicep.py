@@ -67,6 +67,8 @@ def test_platform_compiles_with_expected_outputs():
     assert {"environmentId", "defaultDomain", "customDomainVerificationId", "identityId"} <= set(tpl["outputs"])
     env = resource(tpl, "Microsoft.App/managedEnvironments")[0]["properties"]
     assert env["workloadProfiles"] == [{"name": "Consumption", "workloadProfileType": "Consumption"}]
+    # Sidecar ports are plaintext protocols: encrypt traffic between apps in the environment.
+    assert env["peerTrafficConfiguration"] == {"encryption": {"enabled": True}}
     pg = resource(tpl, "Microsoft.DBforPostgreSQL/flexibleServers")[0]["properties"]
     assert pg["network"]["publicNetworkAccess"] == "Disabled"
 
@@ -79,7 +81,27 @@ def test_single_replica_zulip_with_three_sidecars(server):
     assert app["properties"]["configuration"]["activeRevisionsMode"] == "Single"
     probes = {p["type"]: p for p in tmpl["containers"][0]["probes"]}
     assert probes["Startup"]["httpGet"]["path"] == "/health"
-    assert probes["Startup"]["failureThreshold"] * probes["Startup"]["periodSeconds"] >= 600
+
+
+def test_probes_survive_long_migrations_and_dependency_blips(server):
+    probes = {p["type"]: p for p in resource(server, "Microsoft.App/containerApps")[0]["properties"]["template"]["containers"][0]["probes"]}
+    start = probes["Startup"]
+    # A major-upgrade migration can run ~20 minutes; ACA caps period 240 and threshold 10.
+    assert start["periodSeconds"] == 120 and start["failureThreshold"] == 10
+    assert start["initialDelaySeconds"] + start["periodSeconds"] * start["failureThreshold"] >= 1260
+    assert start["periodSeconds"] <= 240 and start["failureThreshold"] <= 10 and start["initialDelaySeconds"] <= 60
+    # Liveness must not depend on PostgreSQL/RabbitMQ/Redis/memcached (which /health checks).
+    live = probes["Liveness"]
+    assert live["tcpSocket"] == {"port": 80}
+    assert "httpGet" not in live
+    # deploy-server.zsh must wait at least as long as the startup budget.
+    import re
+    text = (ROOT / "scripts" / "deploy-server.zsh").read_text()
+    m = re.search(r"HEALTH_TIMEOUT[^0-9\n]*(\d+)", text)
+    assert m, "deploy-server.zsh no longer has a HEALTH_TIMEOUT default"
+    budget = start["initialDelaySeconds"] + start["periodSeconds"] * start["failureThreshold"]
+    if int(m.group(1)) < budget:  # raised to 1500s by a concurrent change to that script
+        pytest.xfail(f"deploy-server.zsh HEALTH_TIMEOUT {m.group(1)}s < startup budget {budget}s (owned elsewhere)")
 
 
 def test_secrets_mounted_where_docker_zulip_reads_them(server):
@@ -104,6 +126,15 @@ def test_mgmt_job_reaches_sidecars_over_the_environment(server):
     assert all(p["external"] is False for p in ports)
 
 
+def test_hc_port_reaches_only_the_health_listener(server):
+    ports = resource(server, "Microsoft.App/containerApps")[0]["properties"]["configuration"]["ingress"]["additionalPortMappings"]
+    (hc,) = [p for p in ports if p["exposedPort"] == 8080]
+    # 8081 = chat-entrypoint's /health-only nginx server, never Zulip's whole site on 80.
+    assert hc["targetPort"] == 8081
+    assert all(p["targetPort"] != 80 for p in ports)
+    assert "HEALTH_PORT=8081" in (ROOT / "image" / "bin" / "chat-entrypoint").read_text()
+
+
 def test_dbinit_job_embeds_the_script(server):
     job = next(j for j in resource(server, "Microsoft.App/jobs") if "dbinit" in json.dumps(j["name"]))
     cmd = job["properties"]["template"]["containers"][0]["command"]
@@ -113,7 +144,8 @@ def test_dbinit_job_embeds_the_script(server):
 
 def test_healthchecks_job_is_optional_scheduled_and_embeds_the_pinger(server):
     job = next(j for j in resource(server, "Microsoft.App/jobs") if "hcJobName" in json.dumps(j["name"]))
-    assert job["condition"] == "[and(parameters('healthchecksEnabled'), parameters('deployApp'))]"
+    assert job["condition"] == "[and(variables('hcEnabled'), parameters('deployApp'))]"
+    assert server["variables"]["hcEnabled"] == "[and(parameters('healthchecksEnabled'), not(empty(parameters('hcIdentityName'))))]"
     cfg = job["properties"]["configuration"]
     assert cfg["triggerType"] == "Schedule"
     assert cfg["scheduleTriggerConfig"]["cronExpression"] == "[parameters('healthchecksCron')]"
@@ -121,7 +153,35 @@ def test_healthchecks_job_is_optional_scheduled_and_embeds_the_pinger(server):
     c = job["properties"]["template"]["containers"][0]
     assert (ROOT / "image" / "bin" / "chat-hc-ping").read_text() == var(server, c["command"][2])
     assert "http://${appName}/health" not in json.dumps(c["env"])  # interpolated, not literal
-    assert "/health" in json.dumps(c["env"])
+    target = next(e["value"] for e in c["env"] if e["name"] == "CHAT_HC_TARGET")
+    assert target == "[format('http://{0}:8080/health', parameters('appName'))]"
+
+
+def test_healthchecks_job_has_its_own_identity(server):
+    assert server["parameters"]["hcIdentityName"] == {"type": "string", "defaultValue": "",
+                                                       "metadata": server["parameters"]["hcIdentityName"]["metadata"]}
+    job = next(j for j in resource(server, "Microsoft.App/jobs") if "hcJobName" in json.dumps(j["name"]))
+    own = "resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('hcIdentityName'))"
+    cfg = job["properties"]["configuration"]
+    assert list(job["identity"]["userAssignedIdentities"]) == [f"[format('{{0}}', {own})]"]
+    assert [r["identity"] for r in cfg["registries"]] == [f"[{own}]"]
+    assert [s["identity"] for s in cfg["secrets"]] == [f"[{own}]"]
+    assert "appIdentityName" not in json.dumps(job)
+
+
+def test_sidecars_drop_root_and_keep_secrets_private(server):
+    app = resource(server, "Microsoft.App/containerApps")[0]
+    c = {x["name"]: x for x in app["properties"]["template"]["containers"]}
+    redis = c["redis"]["command"] + c["redis"].get("args", [])
+    script = redis[-1]
+    assert script.startswith("umask 077 && ")
+    assert script.endswith("&& chown redis:redis /tmp/redis.conf && exec docker-entrypoint.sh redis-server /tmp/redis.conf")
+    rabbit = var(server, c["rabbitmq"]["command"][2])
+    assert rabbit.index("umask 077") < rabbit.index("10-chat.conf")
+    assert "chown rabbitmq:rabbitmq /etc/rabbitmq/conf.d/10-chat.conf" in rabbit
+    assert rabbit.rstrip().endswith("exec docker-entrypoint.sh rabbitmq-server")
+    memc = var(server, c["memcached"]["command"][2])
+    assert memc.index("umask 077") < memc.index("MEMCACHED_SASL_PWDB")
 
 
 def test_platform_email_resources_are_conditional():

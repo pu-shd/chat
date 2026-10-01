@@ -43,7 +43,8 @@ GROUP="${GROUP:-$(jq -r '.entra.allowed_group_id // empty' "$SERVER_JSON")}"
 EASY_AUTH="$(jqs .easy_auth)"
 
 log_step "App registration $DISPLAY_NAME"
-APP_ID="$(az ad app list --display-name "$DISPLAY_NAME" --query '[0].appId' -o tsv)"
+# Only an app we own: a look-alike would receive this server's sign-in client secret.
+APP_ID="$(entra_app_by_name "$DISPLAY_NAME")" || die "not using app registration $DISPLAY_NAME"
 if [[ -z "$APP_ID" ]]; then
   confirm "Create Entra app registration $DISPLAY_NAME?" || die "aborted"
   APP_ID="$(az ad app create --display-name "$DISPLAY_NAME" --sign-in-audience AzureADMyOrg --query appId -o tsv)"

@@ -43,7 +43,7 @@ services:
 
   redis:
     image: redis:7.4-alpine
-    command: ["sh", "-c", "umask 077 && printf 'requirepass %s\\nbind 0.0.0.0\\nprotected-mode no\\nsave \"\"\\nappendonly no\\n' \"$$(cat /run/secrets/zulip__redis_password)\" > /tmp/redis.conf && exec redis-server /tmp/redis.conf"]
+    command: ["sh", "-c", "umask 077 && printf 'requirepass %s\\nbind 0.0.0.0\\nprotected-mode no\\nsave \"\"\\nappendonly no\\n' \"$$(cat /run/secrets/zulip__redis_password)\" > /tmp/redis.conf && chown redis:redis /tmp/redis.conf && exec docker-entrypoint.sh redis-server /tmp/redis.conf"]
     secrets: [zulip__redis_password]
     networks: [e2e]
 
@@ -54,6 +54,7 @@ services:
       - -euc
       - |
         MEMCACHED_PASSWORD="$$(cat /run/secrets/zulip__memcached_password)"
+        umask 077
         mkdir -p /home/memcache
         echo 'mech_list: plain' > "$$SASL_CONF_PATH"
         echo "zulip@$$HOSTNAME:$$MEMCACHED_PASSWORD" > "$$MEMCACHED_SASL_PWDB"
@@ -71,8 +72,10 @@ services:
       - sh
       - -euc
       - |
+        umask 077
         mkdir -p /etc/rabbitmq/conf.d
         printf 'default_user = zulip\ndefault_pass = %s\n' "$$(cat /run/secrets/zulip__rabbitmq_password)" > /etc/rabbitmq/conf.d/10-chat.conf
+        chown rabbitmq:rabbitmq /etc/rabbitmq/conf.d/10-chat.conf
         exec docker-entrypoint.sh rabbitmq-server
     secrets: [zulip__rabbitmq_password]
     networks: [e2e]
@@ -108,7 +111,8 @@ services:
     entrypoint: ["sh", "/chat-hc-ping"]
     volumes: ["../../image/bin/chat-hc-ping:/chat-hc-ping:ro"]
     environment:
-      CHAT_HC_TARGET: http://zulip/health
+      # = http://<app>:8080/health in Azure, where ingress maps 8080 to this listener.
+      CHAT_HC_TARGET: http://zulip:8081/health
       HC_PING_BASE: http://hc:8000
       HC_SLUG: e2e-chat-dept-health
       HC_PING_KEY_FILE: /run/secrets/hc_ping_key

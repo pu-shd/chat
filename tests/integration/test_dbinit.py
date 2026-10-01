@@ -39,7 +39,7 @@ def fresh_databases(tmp_path_factory):
     every run from no test databases, or a leftover one makes the next run fail or pass
     for the wrong reason."""
     tmp = tmp_path_factory.mktemp("dbinit-reset")
-    for i in range(1, 6):
+    for i in range(1, 8):
         r = dbinit(tmp, f"zulip_t{i}", "reset", action="drop")
         assert r.returncode == 0, r.stderr + r.stdout
 
@@ -87,3 +87,21 @@ def test_drop_removes_database_and_role(tmp_path):
     assert r.returncode == 0, r.stderr + r.stdout
     assert psql("SELECT count(*) FROM pg_database WHERE datname = 'zulip_t5'") == "0"
     assert psql("SELECT count(*) FROM pg_roles WHERE rolname = 'zulip_t5'") == "0"
+
+
+def test_servers_cannot_connect_to_each_others_databases(tmp_path):
+    assert dbinit(tmp_path, "zulip_t6", "pw6").returncode == 0
+    r = dbinit(tmp_path, "zulip_t7", "pw7")
+    assert r.returncode == 0, r.stderr + r.stdout
+    # PUBLIC lost CONNECT and TEMP; the owner keeps its own.
+    acl = psql("SELECT datacl::text FROM pg_database WHERE datname = 'zulip_t6'")
+    assert "=Tc/" not in acl and "=c/" not in acl, acl
+    assert psql("SELECT current_user", user="zulip_t6", password="pw6", db="zulip_t6") == "zulip_t6"
+    with pytest.raises(subprocess.CalledProcessError) as e:
+        psql("SELECT 1", user="zulip_t7", password="pw7", db="zulip_t6")
+    assert "permission denied" in e.value.stderr
+    # Re-running keeps it revoked (idempotent) and the owner still connects.
+    assert dbinit(tmp_path, "zulip_t6", "pw6").returncode == 0
+    assert psql("SELECT current_user", user="zulip_t6", password="pw6", db="zulip_t6") == "zulip_t6"
+    with pytest.raises(subprocess.CalledProcessError):
+        psql("SELECT 1", user="zulip_t7", password="pw7", db="zulip_t6")

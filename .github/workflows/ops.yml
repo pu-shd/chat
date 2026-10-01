@@ -3,11 +3,13 @@ name: Operate a Zulip server (reusable)
 # One entry point for day-2 actions from a config repo:
 #   keepalive    smoke + TLS/secret expiry for every server (or one), Healthchecks ping
 #   healthchecks-sync
-#   teardown-dept  scripts/teardown.zsh; `argument` = its flags (--purge --platform ...)
+#   teardown-dept  scripts/teardown.zsh; `argument` = its flags (--purge --platform --healthchecks)
 #   ip-gate      recompute and apply the pugwips allowlist
 #   realm-list | realm-ensure | realm-deactivate | realm-set-role ("<slug|_root> <email> <role>")
 #   send-test-email | register-push | restart
 #   teardown | teardown-purge   (need `confirm` = the exact phrase the script asks for)
+# Destructive actions (teardown*, realm-deactivate, realm-set-role) refuse to run unless
+# `environment` is a "-admin" GitHub Environment (the one with a required reviewer).
 on:
   workflow_call:
     inputs:
@@ -34,8 +36,12 @@ jobs:
   op:
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
+    # Keyed on the department (config_dir), not the Environment, so an action on one server
+    # queues behind that server's deploy (deploy-server.yml: chat-<dept>-<server>) even when
+    # it runs in <dept>-admin. With no server (keepalive of every server, a department
+    # teardown) the queue is chat-<dept>.
     concurrency:
-      group: chat-${{ inputs.environment }}-${{ inputs.server }}
+      group: chat-${{ inputs.config_dir }}${{ inputs.server != '' && format('-{0}', inputs.server) || '' }}
       cancel-in-progress: false
     timeout-minutes: 45
     env:
@@ -48,18 +54,20 @@ jobs:
       SRV: ${{ inputs.server }}
       ARG: ${{ inputs.argument }}
       ACTION: ${{ inputs.action }}
+      ENVIRONMENT: ${{ inputs.environment }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/checkout@v7
-        with: {repository: pu-shd/chat, ref: "${{ inputs.template_ref }}", path: .chat-template}
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {persist-credentials: false}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {repository: pu-shd/chat, ref: "${{ inputs.template_ref }}", path: .chat-template, persist-credentials: false}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with: {python-version: "3.12"}
       - name: Tools
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq zsh jq
           zsh .chat-template/scripts/setup-venv.zsh
       - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
-      - uses: azure/login@v3
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ inputs.azure_client_id }}
           tenant-id: ${{ inputs.azure_tenant_id }}
@@ -68,6 +76,12 @@ jobs:
         shell: bash
         run: |
           S=.chat-template/scripts
+          # Defense in depth: destructive actions only from an -admin Environment (the
+          # caller picks it; this does not trust the caller to have picked right).
+          case "$ACTION" in
+            teardown|teardown-purge|teardown-dept|realm-deactivate|realm-set-role)
+              [[ "$ENVIRONMENT" == *-admin ]] || { echo "::error::$ACTION needs an -admin environment (got '$ENVIRONMENT')"; exit 2; } ;;
+          esac
           # Inputs are data: accept only the shapes each action needs.
           [[ "$CFG" =~ ^[a-z][a-z0-9]{1,11}$ ]] || { echo "bad config_dir"; exit 2; }
           [[ -z "$SRV" || "$SRV" =~ ^[a-z][a-z0-9-]{0,14}[a-z0-9]$ ]] || { echo "bad server"; exit 2; }
@@ -75,7 +89,9 @@ jobs:
             realm-ensure|realm-deactivate) [[ "$ARG" =~ ^(_root|[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?)$ ]] || { echo "argument must be a realm slug or _root"; exit 2; } ;;
             realm-set-role) [[ "$ARG" =~ ^(_root|[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?)\ [A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\ (owner|admin|moderator|member|guest)$ ]] || { echo "argument must be: <slug|_root> <email> <role>"; exit 2; } ;;
             send-test-email) [[ "$ARG" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || { echo "argument must be an email address"; exit 2; } ;;
-            teardown-dept) [[ "$ARG" =~ ^[[:space:]a-z-]*$ ]] || { echo "argument must be teardown.zsh flags"; exit 2; } ;;
+            # Only these flags: --also-server would reach servers outside this job's
+            # concurrency group, and CI has no Entra/GitHub rights for --entra/--github.
+            teardown-dept) [[ "$ARG" =~ ^[[:space:]]*((--purge|--platform|--healthchecks)([[:space:]]+|$))*$ ]] || { echo "argument must be teardown.zsh flags (--purge --platform --healthchecks)"; exit 2; } ;;
             *) [[ -z "$ARG" ]] || { echo "$ACTION takes no argument"; exit 2; } ;;
           esac
           srv=(); [ -n "$SRV" ] && srv=(--server "$SRV")

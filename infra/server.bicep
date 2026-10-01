@@ -15,6 +15,8 @@ param environmentName string
 @description('Per-server identities (created and granted per secret by grant-access.zsh)')
 param appIdentityName string
 param dbIdentityName string
+@description('The -hc job\'s own identity (KV read on the ping key only, ACR pull); empty = no healthchecks')
+param hcIdentityName string = ''
 param keyVaultName string
 param storageAccountName string
 param postgresHost string
@@ -59,6 +61,8 @@ param tags object = {}
 
 var sidecarCpu = json('0.25')
 var sidecarMemory = '0.5Gi'
+// The -hc job needs its own identity: the app's can read every app secret.
+var hcEnabled = healthchecksEnabled && !empty(hcIdentityName)
 var vaultUri = 'https://${keyVaultName}${environment().suffixes.keyvaultDns}/secrets/'
 
 resource env 'Microsoft.App/managedEnvironments@2025-01-01' existing = {
@@ -69,6 +73,9 @@ resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' 
 }
 resource dbIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = {
   name: dbIdentityName
+}
+resource hcIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = if (hcEnabled) {
+  name: hcIdentityName
 }
 resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' existing = {
   name: storageAccountName
@@ -146,7 +153,11 @@ var mgmtEnv = concat(filter(zulipEnv, e => !contains(sidecarHostKeys, e.name)), 
 
 // ---------------------------------------------------------------- app
 
+// memcached already runs as its own user, so files it writes under umask 077 stay
+// readable to it. RabbitMQ's and Redis's entrypoints start as root and drop to their
+// service user, so their 0600 config files are chowned to that user before exec.
 var memcachedScript = '''
+umask 077
 mkdir -p /home/memcache
 echo 'mech_list: plain' > "$SASL_CONF_PATH"
 echo "zulip@$HOSTNAME:$MEMCACHED_PASSWORD" > "$MEMCACHED_SASL_PWDB"
@@ -154,8 +165,10 @@ echo "zulip@localhost:$MEMCACHED_PASSWORD" >> "$MEMCACHED_SASL_PWDB"
 exec memcached -S -m 256
 '''
 var rabbitmqScript = '''
+umask 077
 mkdir -p /etc/rabbitmq/conf.d
 printf 'default_user = zulip\ndefault_pass = %s\n' "$RABBITMQ_PASSWORD" > /etc/rabbitmq/conf.d/10-chat.conf
+chown rabbitmq:rabbitmq /etc/rabbitmq/conf.d/10-chat.conf
 exec docker-entrypoint.sh rabbitmq-server
 '''
 
@@ -186,9 +199,11 @@ resource app 'Microsoft.App/containerApps@2025-01-01' = if (deployApp) {
           { external: false, targetPort: 6379, exposedPort: 6379 }
           { external: false, targetPort: 5672, exposedPort: 5672 }
           { external: false, targetPort: 11211, exposedPort: 11211 }
-          // Plain HTTP to Zulip's nginx for the -hc probe: the main ingress redirects
-          // http:// to https:// (allowInsecure: false), which a probe must not follow.
-          { external: false, targetPort: 80, exposedPort: 8080 }
+          // Plain HTTP for the -hc probe (the main ingress redirects http:// to https://,
+          // which a probe must not follow). 8081 is chat-entrypoint's health-only nginx
+          // listener: /health and nothing else, so this port never exposes the site
+          // (around Easy Auth and the IP rules) to other workloads in the environment.
+          { external: false, targetPort: 8081, exposedPort: 8080 }
         ]
       }
     }
@@ -205,17 +220,22 @@ resource app 'Microsoft.App/containerApps@2025-01-01' = if (deployApp) {
           volumeMounts: zulipMounts
           probes: [
             {
-              // First boot runs puppet and every migration: allow ~11 minutes.
+              // First boot runs puppet and every migration, and a major upgrade can migrate
+              // for a long time: allow ~21 minutes (ACA caps periodSeconds at 240 and
+              // failureThreshold at 10). deploy-server.zsh waits at least as long.
               type: 'Startup'
               httpGet: { path: '/health', port: 80 }
               initialDelaySeconds: 60
-              periodSeconds: 60
+              periodSeconds: 120
               failureThreshold: 10
               timeoutSeconds: 5
             }
             {
+              // Is nginx up, not are its dependencies: /health also checks PostgreSQL,
+              // RabbitMQ, Redis and memcached, and restarting every server over a shared
+              // PostgreSQL blip would also wipe the in-memory RabbitMQ queues.
               type: 'Liveness'
-              httpGet: { path: '/health', port: 80 }
+              tcpSocket: { port: 80 }
               periodSeconds: 30
               failureThreshold: 5
               timeoutSeconds: 5
@@ -227,8 +247,9 @@ resource app 'Microsoft.App/containerApps@2025-01-01' = if (deployApp) {
           image: sidecarImages.redis
           resources: { cpu: sidecarCpu, memory: sidecarMemory }
           command: [ 'sh', '-c' ]
-          // Password in a 0600 config file, not on redis-server's command line.
-          args: [ 'umask 077 && printf \'requirepass %s\nbind 0.0.0.0\nprotected-mode no\nsave ""\nappendonly no\n\' "$REDIS_PASSWORD" > /tmp/redis.conf && exec redis-server /tmp/redis.conf' ]
+          // Password in a 0600 config file, not on redis-server's command line. Through the
+          // image's docker-entrypoint.sh, which drops root for the redis user.
+          args: [ 'umask 077 && printf \'requirepass %s\nbind 0.0.0.0\nprotected-mode no\nsave ""\nappendonly no\n\' "$REDIS_PASSWORD" > /tmp/redis.conf && chown redis:redis /tmp/redis.conf && exec docker-entrypoint.sh redis-server /tmp/redis.conf' ]
           env: [ { name: 'REDIS_PASSWORD', secretRef: 'redis-password' } ]
         }
         {
@@ -374,13 +395,13 @@ resource dbinit 'Microsoft.App/jobs@2025-01-01' = {
 // Healthchecks.io probe from inside the environment (works with the IP gate and before DNS).
 // Created with the app (not in the infra phase), so a first deploy never pages before
 // Zulip exists.
-resource hc 'Microsoft.App/jobs@2025-01-01' = if (healthchecksEnabled && deployApp) {
+resource hc 'Microsoft.App/jobs@2025-01-01' = if (hcEnabled && deployApp) {
   name: hcJobName
   location: location
   tags: union(tags, { 'chat-server': serverName })
   identity: {
     type: 'UserAssigned'
-    userAssignedIdentities: { '${identity.id}': {} }
+    userAssignedIdentities: { '${hcIdentity.id}': {} }
   }
   properties: {
     environmentId: env.id
@@ -390,9 +411,9 @@ resource hc 'Microsoft.App/jobs@2025-01-01' = if (healthchecksEnabled && deployA
       replicaTimeout: 120
       replicaRetryLimit: 0
       scheduleTriggerConfig: { cronExpression: healthchecksCron, parallelism: 1, replicaCompletionCount: 1 }
-      registries: [ { server: registryServer, identity: identity.id } ]
+      registries: [ { server: registryServer, identity: hcIdentity.id } ]
       secrets: [
-        { name: 'hc-ping-key', keyVaultUrl: '${vaultUri}healthchecks-ping-key', identity: identity.id }
+        { name: 'hc-ping-key', keyVaultUrl: '${vaultUri}healthchecks-ping-key', identity: hcIdentity.id }
       ]
     }
     template: {

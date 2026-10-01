@@ -117,12 +117,44 @@ jq -e '.created == false and .role == "moderator"' <<<"$r5" >/dev/null || { prin
 if out="$("${compose[@]}" run --rm -T mgmt chat:manage set-role _root nobody@e2e.test owner 2>&1)"; then
   print -u2 "set-role must refuse an unknown account without a full name"; exit 1
 fi
+# The only owner can never be demoted (that would orphan the realm).
+if out="$("${compose[@]}" run --rm -T mgmt chat:manage set-role _root owner@e2e.test admin 2>&1)"; then
+  print -u2 -r -- "$out" | tail -5; print -u2 "set-role must refuse to demote the last owner"; exit 1
+fi
+print -r -- "$out" | grep -q 'CHAT-RESULT: .*"ok": false.*last active owner' || { print -u2 -r -- "$out" | tail -20; print -u2 "expected a last-owner refusal"; exit 1; }
+# Realm deactivation (12.x requires a reason): a spare realm, deactivated, then listed so.
+r6="$(job ensure-realm spare 'E2E Spare' owner@e2e.test 'E2E Owner')"
+print -u2 -r -- "mgmt: $r6"
+r7="$(job deactivate-realm spare)"
+print -u2 -r -- "mgmt: $r7"
+r8="$(job list-realms)"
+jq -e '.realms[] | select(.slug == "spare") | .deactivated == true' <<<"$r8" >/dev/null || { print -u2 -r -- "$r8"; print -u2 "spare realm should be deactivated"; exit 1; }
+if out="$("${compose[@]}" run --rm -T mgmt chat:manage deactivate-realm no-such-realm 2>&1)"; then
+  print -u2 "deactivate-realm must fail for an unknown realm"; exit 1
+fi
+print -r -- "$out" | grep -q 'CHAT-RESULT: .*"ok": false' || { print -u2 -r -- "$out" | tail -20; print -u2 "a failed deactivate-realm must say ok:false"; exit 1; }
+print -r -- "$out" | grep -q '"ok": true' && { print -u2 "a failed deactivate-realm printed ok:true"; exit 1; }
 
 # The -hc job: one healthy probe, and one against a path that fails (must ping /fail).
 "${compose[@]}" run --rm -T hcjob
-if "${compose[@]}" run --rm -T -e CHAT_HC_TARGET=http://zulip/no-such-health-endpoint hcjob; then
+if "${compose[@]}" run --rm -T -e CHAT_HC_TARGET=http://zulip:8081/no-such-health-endpoint hcjob; then
   print -u2 "the hc probe should have failed against a bad target"; exit 1
 fi
+# The health listener serves /health only: never the site, whatever the caller claims.
+for p in / /login/ /api/v1/server_settings /json/users /healthz; do
+  code="$("${compose[@]}" run --rm -T --entrypoint curl hcjob -s -o /dev/null -w '%{http_code}' -H 'X-Forwarded-For: 127.0.0.1' -H 'Host: chat.e2e.test' "http://zulip:8081$p")"
+  [[ "$code" == 404 ]] || { print -u2 "health listener served $p with $code (want 404)"; exit 1; }
+done
+code="$("${compose[@]}" run --rm -T --entrypoint curl hcjob -s -o /dev/null -w '%{http_code}' -H 'X-Forwarded-For: 203.0.113.9' "http://zulip:8081/health")"
+[[ "$code" == 200 ]] || { print -u2 "health listener /health returned $code"; exit 1; }
+print -u2 "health listener: /health only"
+
+# Sidecars run as their service users, never root (Redis via its docker-entrypoint.sh).
+for svc in redis rabbitmq memcached; do
+  uid="$("${compose[@]}" exec -T "$svc" awk '/^Uid:/ {print $2}' /proc/1/status)"
+  [[ -n "$uid" && "$uid" != 0 ]] || { print -u2 "$svc runs as uid '${uid}' (want non-root)"; exit 1; }
+  print -u2 "$svc pid 1 uid $uid"
+done
 
 # Theme drift: every Zulip variable a theme sets must still be defined by this Zulip's CSS
 # (all bundles, including the ones the web app loads on demand).

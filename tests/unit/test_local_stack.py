@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 
@@ -88,6 +89,81 @@ def test_localize_cli_fails_loudly_on_an_unknown_theme(tmp_path):
     r, _ = localize(tmp_path, "--theme", "no-such-theme")
     assert r.returncode == 2
     assert "does not render" in r.stderr and "no-such-theme" in r.stderr
+
+
+def localize_cfg(tmp_path, cfg: dict, *args: str) -> tuple[subprocess.CompletedProcess, dict | None]:
+    """localize a modified copy of the fixture department."""
+    src = tmp_path / "src" / "orfe"
+    shutil.copytree(FIXTURES / "orfe", src)
+    (src / "chat.yml").write_text(yaml.safe_dump(cfg, sort_keys=False))
+    r = subprocess.run([sys.executable, str(ROOT / "tools" / "local_stack.py"), "localize",
+                        str(src), str(tmp_path / "out"), *args], capture_output=True, text=True)
+    return r, (json.loads(r.stdout) if r.returncode == 0 else None)
+
+
+def test_localize_drops_cloud_only_defaults(tmp_path):
+    cfg = fixture_cfg()
+    cfg["defaults"] = {"ip_gate": True, "easy_auth": True, "cert": {"key_vault_certificate": "c"}, "cpu": 2.5}
+    out, _ = local_stack.localize_config(cfg, None, None)
+    assert out["defaults"] == {"dns": "live", "cpu": 2.5}
+    r, stack = localize_cfg(tmp_path, cfg)
+    assert r.returncode == 0, r.stderr
+    assert stack["server"] == "dept"
+
+
+@pytest.mark.parametrize("department", ["../victim", "..", "/tmp/x", "Orfe", None, 7])
+def test_localize_refuses_a_bad_department_before_touching_files(tmp_path, department):
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "keep").write_text("precious")
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / "keep").write_text("precious")
+    cfg = fixture_cfg()
+    if department is None:
+        cfg.pop("department")
+    else:
+        cfg["department"] = department
+    r, _ = localize_cfg(tmp_path, cfg)
+    assert r.returncode == 2
+    assert "is not a valid department name" in r.stderr and "refusing to touch" in r.stderr
+    assert (victim / "keep").read_text() == "precious"
+    assert (tmp_path / "out" / "keep").read_text() == "precious"
+
+
+def test_localize_refuses_an_out_dir_that_escapes_out_parent(tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "keep").write_text("precious")
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / "orfe").symlink_to(elsewhere)
+    with pytest.raises(local_stack.LocalError, match="is not inside .*refusing to touch it"):
+        local_stack.local_dir(tmp_path / "out", "orfe")
+    r, _ = localize(tmp_path)
+    assert r.returncode == 2 and "refusing to touch it" in r.stderr
+    assert (elsewhere / "keep").read_text() == "precious"
+
+
+def test_local_dir_accepts_a_valid_department(tmp_path):
+    assert local_stack.local_dir(tmp_path, "orfe") == (tmp_path / "orfe").resolve()
+
+
+@pytest.mark.parametrize("acs", [{"domain": "azure-managed"}, {"domain": "orfe.example.edu"}])
+def test_localize_turns_acs_into_plain_smtp(tmp_path, acs):
+    cfg = fixture_cfg()
+    cfg["email"] = {"provider": "acs", "acs": acs}
+    if acs["domain"] != "azure-managed":
+        cfg["email"]["from"] = "donotreply@orfe.example.edu"
+    out, _ = local_stack.localize_config(cfg, None, None)
+    assert out["email"]["provider"] == "smtp" and "acs" not in out["email"]
+    assert out["email"]["from"] == ("noreply@orfe.localhost" if acs["domain"] == "azure-managed"
+                                    else "donotreply@orfe.example.edu")
+    r, stack = localize_cfg(tmp_path, cfg)
+    assert r.returncode == 0, r.stderr
+    # No --acs-mail-from: nothing is left for deploy time.
+    params = resolve(stack["server_json"])
+    env = {e["name"]: e["value"] for e in params["parameters"]["zulipEnv"]["value"]}
+    assert env["SETTING_NOREPLY_EMAIL_ADDRESS"] == out["email"]["from"]
+    assert "azurecomm" not in json.dumps(env)
 
 
 # ---------------------------------------------------------------- override
@@ -226,6 +302,7 @@ def test_local_down_removes_the_stack_and_its_state(run, shims, tmp_path):
     state = tmp_path / "s"
     (state / "secrets").mkdir(parents=True)
     (state / "override.json").write_text("{}")
+    (state / ".chat-local-stack").write_text("")  # what `up` leaves; `down` deletes nothing else
     shims.on("docker-compose", r" --profile jobs down -v --remove-orphans$")
     r = run("local.zsh", "down", env={"CHAT_LOCAL_STATE": str(state)})
     assert r.returncode == 0, r.stderr

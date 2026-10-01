@@ -126,7 +126,7 @@ Before the first bootstrap, cut a template release (`git tag vX.Y.Z && git push 
 **Images.** Nothing is published to a public registry. Each department's deploy builds the image into its own Azure Container Registry from the pinned commit (`build-image.zsh`, `az acr build`), the same pattern as graddb and meet.
 - The tag `chat:<ref>-<sha7>` is built once and then locked against overwrite and deletion.
 - Servers pull it by digest with their managed identities (AcrPull). There are no registry passwords or tokens.
-- The sidecar images (redis, memcached, rabbitmq, postgres, curl; see `image/sidecars.json`) are imported into the same registry, so no server depends on Docker Hub, or its rate limits, at run time.
+- The sidecar images (redis, memcached, rabbitmq, postgres, curl; see `image/sidecars.json`) are pinned by tag **and digest**, imported by that digest into the same registry, and pulled by digest. No server depends on Docker Hub, or its rate limits, at run time, and every department runs the same bytes for a release.
 
 ## Running and testing before DNS exists
 
@@ -245,18 +245,24 @@ Realms are deactivated, never deleted: `realm.zsh --deactivate <slug>`, with typ
 
 - **Who can act as CI.** The config repo's Azure identity trusts two GitHub Environments.
   - `<dept>` (deploy, keepalive, IP gate, update checks) accepts only protected branches, so a pushed feature branch cannot get the Azure token.
-  - `<dept>-admin` (Teardown, realm deactivation) also needs a reviewer's approval.
-  - `setup-github-repo.zsh` protects `main` and configures both environments. The typed confirmation phrases are a second safeguard, not the only one.
+  - `<dept>-admin` (Teardown, realm deactivation, role changes) also needs a reviewer's approval, and **not from the person who started the run** (`prevent_self_review`). Add a second reviewer with `--admin-reviewer <login>` (repeatable, on `setup-github-repo.zsh` or `bootstrap.zsh --set-gh-vars`); with only one, teardowns can be started but never approved, and the script warns.
+  - The reusable Operate workflow refuses destructive actions unless it runs in an `-admin` environment, whatever the calling workflow says.
+  - `setup-github-repo.zsh` protects `main` and configures both environments. It leaves an existing `main` protection unchanged unless `--force`, and merges admin reviewers instead of replacing them. Both environments use the same Azure identity, so the branch rules and reviewers are the gate; the typed confirmation phrases are a second safeguard.
 - **What code runs.**
   - Config repos pin every `uses: pu-shd/chat/...` to a **commit SHA**, with the tag as a comment; release tags in pu-shd/chat are immutable (a ruleset).
   - Images are **built inside each department's own registry** from that commit. `build-image.zsh` refuses a template checkout that isn't exactly the locked commit, or that has local changes under `image/`. The built tag is locked against overwrite and deletion. Deploys use its digest and refuse images from any other registry. Zulip's own base image is pinned by digest.
-  - Third-party actions are pinned to commit SHAs.
-  - The config repo's update check runs new template code only with a read-only token. A separate job, which runs none of it, opens the PR.
+  - Every action, GitHub's own included, is pinned to a commit SHA (tests in both repos enforce it).
+  - Releases: the Release workflow refuses a tag whose commit isn't on `main`, and marks only the highest version Latest. Update checks accept only a newer `vX.Y.Z` whose commit is on `main` (no downgrades, no branch tags).
+  - The config repo's update check runs new template code only with a read-only token. The job that opens the PR runs none of it, and accepts the patch only if it touches `template.lock`, `*/generated/**` and the `uses: pu-shd/chat/...@<sha> # <tag>` pin lines, all naming the release it expected. A release that needs any other change to a config repo's workflows has to be applied there by hand.
 - **Least privilege in Azure.** Each server has its own identities, granted per secret by `grant-access.zsh`:
-  - `<app>-id`: the Zulip app, the `-mgmt` and `-hc` jobs; only its own secrets.
+  - `<app>-id`: the Zulip app and the `-mgmt` job; only its own secrets.
   - `<app>-db-id`: `-dbinit` only; its database password plus the PostgreSQL admin password.
+  - `<app>-hc-id` (with Healthchecks): the `-hc` job only; just the ping key.
+  - `render.py` refuses configs where names derived for two servers would collide (an identity, job, app, secret, check or database), so one server can never pick up another's identity.
   - Nothing has vault-wide read, so a compromised server cannot read another server's secrets or the admin password.
-  - Both identities have AcrPull on the department registry, and nothing else there. CI builds with its Contributor role on the resource group.
+  - Each identity has AcrPull on the department registry, and nothing else there.
+  - Each server's database is closed to the other servers' roles (`REVOKE ALL ... FROM PUBLIC`).
+  - The `-hc` job reaches the app on an internal port (8080) that serves only `/health`; it is not a back door to the site. CI builds with its Contributor role on the resource group.
   - Key Vault has purge protection: deleted secrets stay recoverable for 90 days.
 - **Secrets never on command lines or in logs.** Key Vault values go through 0600 files. The Healthchecks key reaches curl as config on stdin. psql and Redis read passwords from files. The CI stand-in tests assert this.
 - **Inputs are data.**
@@ -266,6 +272,10 @@ Realms are deactivated, never deleted: `realm.zsh --deactivate <slug>`, with typ
   - IP-gate ranges must be strict IPv4 CIDRs no wider than /8. Downloads from `fallback_url` must be signed.
 - **Sign-up.** A shared server's Entra app admits everyone assigned to it into *every* realm on it. On shared servers, OIDC `auto_signup` therefore defaults to off (invitation only); give a group that needs a separate audience its own server and Entra group.
 - **Proxy trust.** Zulip trusts `X-Forwarded-*` from the whole Container Apps subnet (`LOADBALANCER_IPS`). That subnet includes other apps in the environment, so keep unrelated workloads out of a department's environment.
+- **Shared file storage (known limit).** Every server's `/data` is a share in one department storage account, mounted over NFS. Access is limited to the Container Apps subnet, with no per-share credentials and no encryption in transit, and the account allows root access (`NoRootSquash`, which the image's `chown` needs).
+  - `/data` holds uploads and `zulip-secrets.conf`, which contains every secret of that server, including ones Zulip generates itself.
+  - So a workload in the subnet with a userspace NFS client could read any server's share. Container Apps doesn't allow the privileged containers that a kernel NFS mount needs, which narrows this to code that ships its own NFS client.
+  - The mitigation is the same as for proxy trust: run only this department's Zulip servers and their jobs in its environment. A group that needs storage isolation from the department needs its own platform (a separate config directory), not only its own server.
 
 ## Email with Azure Communication Services (optional)
 
@@ -353,7 +363,7 @@ healthchecks:
 | `<prefix>-updates` | the config repo's weekly Update check | weekly |
 
 - Every ping uses the project **ping key** plus the slug (`https://hc-ping.com/<key>/<slug>`), so there is no per-check URL to store.
-  - The ping key lives in Key Vault as `healthchecks-ping-key`, which the `-hc` job reads.
+  - The ping key lives in Key Vault as `healthchecks-ping-key`, which only the `-hc` job's own identity reads.
   - It is also the GitHub secret `HEALTHCHECKS_PING_KEY`, which CI uses.
 - With the project **API key** (`healthchecks-api-key` in Key Vault, or the GitHub secret `HEALTHCHECKS_API_KEY`), `healthchecks.zsh --sync` creates or updates every check with the schedules above. Deploys run it automatically.
 - Without the API key, checks are created by their first ping with Healthchecks' default schedule, which you then adjust in the UI.
@@ -384,7 +394,7 @@ healthchecks:
 
 | Where | How |
 |---|---|
-| Locally | `scripts/teardown.zsh --config <dept> [--server x] [--purge] [--healthchecks] [--entra] [--platform] [--github]`, the reverse of `bootstrap.zsh`. It asks for one confirmation, `TEARDOWN <dept>` (or `TEARDOWN <dept> PURGE`) |
+| Locally | `scripts/teardown.zsh --config <dept> [--server x ...] [--purge] [--healthchecks] [--entra] [--platform] [--github]`, the reverse of `bootstrap.zsh`. `--server` repeats. It asks for one confirmation that names what goes: `TEARDOWN <dept> ALL`, or `TEARDOWN <dept> <servers, sorted>`, plus ` PURGE` with `--purge` |
 | CI | the config repo's **Teardown** workflow (manual): dept, one server or all, purge, platform, and the same phrase |
 
 | Mode | Effect |
@@ -436,7 +446,9 @@ These depend on Azure behaviour that the local tests cannot reproduce. Check the
 - `LOADBALANCER_IPS` set to the environment subnet: the ingress proxy's `X-Forwarded-For` must be trusted, and public clients must be denied `/health`.
 - The `-mgmt` job reaching the sidecars through `additionalPortMappings` while IP restrictions are on. The gate adds an `aca-internal` allow rule for the subnet.
 - `az containerapp job logs show` output, which `run_job` parses. It falls back to Log Analytics.
-- The `-hc` job reaching `http://<app>:8080/health` through the internal-only TCP port mapping (plain HTTP, no redirect).
+- The `-hc` job reaching `http://<app>:8080/health` through the internal-only TCP port mapping to the image's health-only listener (8081).
+- Peer-traffic encryption on the environment (`peerTrafficConfiguration`) for the internal sidecar and health ports.
+- The probes: liveness is a TCP check on port 80 (so a PostgreSQL blip doesn't restart every server); startup allows about 21 minutes for migrations, and `deploy-server.zsh` waits up to 25.
 - `az containerapp job start --env-vars` merging with (not replacing) the job's environment. The purge teardown relies on it and checks the job's own `dropped` report.
 - Healthchecks' `GET /api/v3/checks/?slug=` filter, which `--sync` uses to find existing checks.
 - `az acr build` / `az acr import` into the Basic registry from CI (Contributor on the resource group), and Container Apps pulling with the user-assigned identities' AcrPull.

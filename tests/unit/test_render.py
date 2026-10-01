@@ -4,11 +4,13 @@ from __future__ import annotations
 import ast
 import base64
 import json
+import re
 
 import pytest
 
 import render
 import zulip_reserved
+from conftest import ROOT
 
 DOMAIN = "happy-sea-123.canadacentral.azurecontainerapps.io"
 REGISTRY = "orfechatacr.azurecr.io"
@@ -308,7 +310,9 @@ def test_resolve_refuses_images_from_other_registries(dept, capsys):
 def test_sidecars_come_from_the_department_registry(dept, capsys):
     p = resolve(dept, "dept", capsys)
     side = p["sidecarImages"]["value"]
-    assert side["redis"].startswith(f"{REGISTRY}/library/redis:") and side["curl"].startswith(f"{REGISTRY}/curlimages/curl:")
+    assert re.fullmatch(rf"{re.escape(REGISTRY)}/library/redis@sha256:[0-9a-f]{{64}}", side["redis"]), side["redis"]
+    assert re.fullmatch(rf"{re.escape(REGISTRY)}/curlimages/curl@sha256:[0-9a-f]{{64}}", side["curl"]), side["curl"]
+    assert set(side) == {k for k in json.loads((ROOT / "image" / "sidecars.json").read_text()) if not k.startswith("_")}
     assert p["registryServer"]["value"] == REGISTRY
 
 
@@ -465,7 +469,8 @@ def test_acs_managed_domain_resolves_sender_at_deploy(dept, capsys):
     assert "pass --acs-mail-from" in capsys.readouterr().err
     env = resolve(dept, "dept", capsys, "--acs-mail-from", "DoNotReply@1234abcd.azurecomm.net")["_env"]
     assert env["SETTING_NOREPLY_EMAIL_ADDRESS"] == "DoNotReply@1234abcd.azurecomm.net"
-    assert env["SETTING_DEFAULT_FROM_EMAIL"] == "ORFE Chat <DoNotReply@1234abcd.azurecomm.net>"
+    # Zulip overrides DEFAULT_FROM_EMAIL with ZULIP_ADMINISTRATOR, so it is never sent.
+    assert "SETTING_DEFAULT_FROM_EMAIL" not in env
 
 
 @pytest.mark.parametrize("email, message", [

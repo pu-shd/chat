@@ -20,5 +20,8 @@ COPY bin/ /usr/local/bin/
 COPY themes/ /usr/local/share/chat-themes/
 RUN chmod 0755 /usr/local/bin/chat-* && rm -f /usr/local/share/chat-themes/README.md
 
+# 80: Zulip (behind the Container Apps ingress). 8081: chat-entrypoint's internal
+# /health-only listener for the -hc job (server.bicep maps 8080 to it).
+EXPOSE 80 8081
 ENTRYPOINT ["/usr/local/bin/chat-entrypoint"]
 CMD ["app:run"]

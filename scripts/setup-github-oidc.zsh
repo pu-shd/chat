@@ -2,7 +2,7 @@
 # setup-github-oidc.zsh — secret-free GitHub Actions → Azure login for a config repo
 # (after meet's infrastructure/setup-github-oidc.sh).
 #
-#   scripts/setup-github-oidc.zsh --config <dept-dir> [--set-gh-vars] [--yes]
+#   scripts/setup-github-oidc.zsh --config <dept-dir> [--set-gh-vars [--admin-reviewer <login> ...]] [--yes]
 #
 # Creates (or reuses) the app registration <prefix>-github-actions with one federated
 # credential whose subject is the config repo's GitHub Environment:
@@ -12,30 +12,39 @@
 # managed by an operator with entra-app.zsh, never by CI.
 #
 # --set-gh-vars also runs setup-github-repo.zsh (protected main; environments <env> and
-# <env>-admin, the OIDC subjects) and sets
+# <env>-admin, the OIDC subjects; --admin-reviewer is passed on: who may approve
+# teardowns, never their own) and sets
 # AZURE_CLIENT_ID, AZURE_TENANT_ID and AZURE_SUBSCRIPTION_ID as repository variables:
 # the config repo's deploy job passes them to pu-shd/chat's reusable workflow, and a job
 # that calls a reusable workflow cannot read environment-scoped variables.
 source "${0:A:h}/common.zsh"
 SET_GH_VARS=false
+typeset -a REPO_ARGS
 parse_common_args "$@"
-for a in "${CHAT_ARGS_REST[@]}"; do
-  case "$a" in --set-gh-vars) SET_GH_VARS=true ;; *) die "unknown argument: $a" ;; esac
+set -- "${CHAT_ARGS_REST[@]}"
+while (( $# )); do
+  case "$1" in
+    --set-gh-vars) SET_GH_VARS=true; shift ;;
+    --admin-reviewer) REPO_ARGS+=(--admin-reviewer "${2:?--admin-reviewer needs a GitHub login}"); shift 2 ;;
+    *) die "unknown argument: $1" ;;
+  esac
 done
+(( ${#REPO_ARGS} == 0 )) || $SET_GH_VARS || die "--admin-reviewer only applies with --set-gh-vars"
 load_platform
 az_login
 
 REPO="$(jqp .github.repo)"
 GH_ENV="$(jqp .github.environment)"
 APP_DISPLAY="$(jqp .names.github_app)"
-SUBJECT="repo:$REPO:environment:$GH_ENV"
+SUBJECT="repo:${REPO}:environment:${GH_ENV}"  # braces: $REPO:e would be a zsh modifier
 CRED_NAME="gh-${GH_ENV}"
-ADMIN_SUBJECT="repo:$REPO:environment:${GH_ENV}-admin"
+ADMIN_SUBJECT="repo:${REPO}:environment:${GH_ENV}-admin"
 
 az group show -n "$RG" >/dev/null 2>&1 || die "$RG does not exist; run deploy-platform.zsh first"
 
 log_step "App registration $APP_DISPLAY"
-APP_ID="$(az ad app list --display-name "$APP_DISPLAY" --query '[0].appId' -o tsv)"
+# Never adopt a look-alike: it would be granted Contributor and Key Vault Secrets Officer.
+APP_ID="$(entra_app_by_name "$APP_DISPLAY")" || die "not granting anything to $APP_DISPLAY"
 if [[ -n "$APP_ID" ]]; then
   log_ok "exists ($APP_ID)"
 else
@@ -95,7 +104,7 @@ if $SET_GH_VARS; then
   require_cmd gh
   gh auth status >/dev/null 2>&1 || die "gh is not authenticated (gh auth login)"
   confirm "Protect $REPO, create environments '$GH_ENV' and '$GH_ENV-admin', and set those three repository variables?" || die "not changed"
-  "${0:A:h}/setup-github-repo.zsh" --config "$CONFIG_DIR" --yes
+  "${0:A:h}/setup-github-repo.zsh" --config "$CONFIG_DIR" --yes "${REPO_ARGS[@]}"
   gh variable set AZURE_CLIENT_ID --repo "$REPO" --body "$APP_ID"
   gh variable set AZURE_TENANT_ID --repo "$REPO" --body "$TENANT_ID"
   gh variable set AZURE_SUBSCRIPTION_ID --repo "$REPO" --body "$SUB_ID"

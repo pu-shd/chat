@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -34,6 +35,10 @@ IDP_HOST = "login.localhost"
 IDP_ISSUER = f"http://{IDP_HOST}:{IDP_PORT}/entra"
 CLIENT_ID = "00000000-0000-4000-8000-00000000c0de"
 MAILPIT_UI = "http://localhost:8025"
+# Cloud-only server settings that never apply locally.
+CLOUD_ONLY = ("ip_gate", "cert", "easy_auth")
+# Any SMTP relay will do: build_override points Zulip at mailpit.
+LOCAL_SMTP = {"provider": "smtp", "host": "mail.localhost", "port": 587, "user": "local"}
 
 
 class LocalError(Exception):
@@ -49,15 +54,23 @@ def localize_config(cfg: dict, server: str | None, theme: str | None) -> tuple[d
         server = "dept" if "dept" in servers else next(iter(servers))
     if server not in servers:
         raise LocalError(f"no server {server!r} in chat.yml (have: {', '.join(servers)})")
-    cfg.setdefault("defaults", {})["dns"] = "live"
+    defaults = cfg.setdefault("defaults", {})
+    defaults["dns"] = "live"
     # Nothing here reaches Azure or third parties.
     cfg["ip_gate"] = {"enabled": False}
     cfg["healthchecks"] = {"enabled": False}
+    for key in CLOUD_ONLY:
+        defaults.pop(key, None)
+    email = cfg.get("email") or {}
+    if email.get("provider") == "acs":
+        # ACS needs Azure (and an Azure-managed sender only known at deploy time).
+        dept = str(cfg.get("department", "local"))
+        cfg["email"] = {**LOCAL_SMTP, "from": email.get("from") or f"noreply@{dept}.localhost",
+                        **({"from_name": email["from_name"]} if "from_name" in email else {})}
     for s in servers.values():
         s.pop("dns", None)
-        s.pop("ip_gate", None)
-        s.pop("cert", None)
-        s.pop("easy_auth", None)
+        for key in CLOUD_ONLY:
+            s.pop(key, None)
         for key in ("host", "external_host", "realm_domain"):
             if key in s:
                 s[key] = s[key] + SUFFIX
@@ -70,11 +83,30 @@ def localize_config(cfg: dict, server: str | None, theme: str | None) -> tuple[d
     return cfg, server
 
 
+def department_pattern() -> str:
+    return json.loads(render.SCHEMA_PATH.read_text())["properties"]["department"]["pattern"]
+
+
+def local_dir(out_parent: Path, department) -> Path:
+    """<out_parent>/<department>, refused unless it is a valid department name strictly
+    inside out_parent: localize deletes and recreates it."""
+    if not isinstance(department, str) or not re.fullmatch(department_pattern(), department):
+        raise LocalError(f"chat.yml department {department!r} is not a valid department name "
+                         f"(pattern {department_pattern()}); refusing to touch {out_parent}")
+    parent = out_parent.resolve()
+    out = (parent / department).resolve()
+    if out.parent != parent:
+        raise LocalError(f"{out} is not inside {parent}; refusing to touch it")
+    return out
+
+
 def cmd_localize(args: argparse.Namespace) -> int:
     cfg = yaml.safe_load((Path(args.dept_dir) / "chat.yml").read_text())
-    local, server = localize_config(cfg, args.server, args.theme)
+    if not isinstance(cfg, dict):
+        raise LocalError("chat.yml must be a mapping")
     # render.py wants the department's directory named after it.
-    out = Path(args.out_parent) / str(cfg.get("department", ""))
+    out = local_dir(Path(args.out_parent), cfg.get("department"))
+    local, server = localize_config(cfg, args.server, args.theme)
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)

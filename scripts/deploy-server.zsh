@@ -75,17 +75,20 @@ missing=("${(@o)missing}")
 # Each identity must be able to read exactly its secrets (grant-access.zsh, operator).
 KV_ID="$(az keyvault show -n "$KV_NAME" -g "$RG" --query id -o tsv)"
 no_access=()
-for kind in app db; do
+# app, db, and hc (the healthchecks pinger) when the server JSON has it.
+KINDS=("${(@f)$(jqs '.identities | keys[]')}")
+for kind in "${KINDS[@]}"; do
   ident="$(jqs ".identities.$kind.name")"
   pid="$(az identity show -g "$RG" -n "$ident" --query principalId -o tsv 2>/dev/null || true)"
   if [[ -z "$pid" ]]; then no_access+=("$ident (missing)"); continue; fi
   for s in "${(@f)$(jqs ".identities.$kind.secrets[]")}"; do
+    [[ -n "$s" ]] || continue  # never a scope of the whole vault
     [[ -n "$(az role assignment list --assignee "$pid" --scope "$KV_ID/secrets/$s" --role 'Key Vault Secrets User' --query '[0].id' -o tsv 2>/dev/null)" ]] \
       || no_access+=("$ident → $s")
   done
 done
 ACR_ID="$(az acr show -n "$ACR" -g "$RG" --query id -o tsv)"
-for kind in app db; do
+for kind in "${KINDS[@]}"; do
   ident="$(jqs ".identities.$kind.name")"
   pid="$(az identity show -g "$RG" -n "$ident" --query principalId -o tsv 2>/dev/null || true)"
   [[ -z "$pid" ]] && continue
@@ -103,7 +106,9 @@ log_ok "secrets and client id present"
 log_step "2/6 Live state to preserve"
 DOMAIN="$(env_default_domain)"
 [[ -n "$DOMAIN" ]] || die "could not read $ENV_NAME's default domain"
-LIVE_IMAGE="" CUSTOM_DOMAINS='[]'
+LIVE_IMAGE="" CUSTOM_DOMAINS='[]' RESTORED_DOMAINS=false
+# app_exists ends the script on an error that is not "not found": guessing "first deploy"
+# would drop the bound hostnames and skip the maintenance window.
 if app_exists; then
   LIVE="$(az containerapp show -g "$RG" -n "$APP_NAME" -o json)"
   LIVE_IMAGE="$(print -r -- "$LIVE" | jq -r '.properties.template.containers[] | select(.name=="zulip") | .image')"
@@ -112,9 +117,13 @@ if app_exists; then
 else
   log_info "first deploy of $APP_NAME"
   # A preserve-mode teardown saved the bound hostnames; bring them back with the app.
-  saved="$(kv_secret_get "$SERVER-custom-domains" 2>/dev/null || true)"
-  if [[ -n "$saved" ]] && print -r -- "$saved" | jq -e 'type == "array"' >/dev/null 2>&1; then
+  saved=""
+  if kv_secret_exists "$SERVER-custom-domains"; then
+    saved="$(kv_secret_get "$SERVER-custom-domains")" || die "could not read $SERVER-custom-domains from $KV_NAME"
+  fi
+  if [[ -n "$saved" ]] && print -r -- "$saved" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
     CUSTOM_DOMAINS="$(print -r -- "$saved" | jq -c .)"
+    RESTORED_DOMAINS=true
     log_ok "restoring $(print -r -- "$CUSTOM_DOMAINS" | jq length) hostname binding(s) saved at teardown"
   fi
 fi
@@ -148,9 +157,10 @@ deploy() {  # deploy <name-suffix> <params-file>
     --query properties.outputs -o json
 }
 
+P_INFRA="" P_APP=""
+trap 'rm -f "$P_INFRA" "$P_APP"' EXIT
 P_INFRA="$(params false)"
 P_APP="$(params true)"
-trap 'rm -f "$P_INFRA" "$P_APP"' EXIT
 if $DRY_RUN; then
   log_step "dry run: what-if"
   az deployment group what-if -g "$RG" -n "chat-$SERVER-app" \
@@ -169,8 +179,14 @@ if [[ -n "$LIVE_IMAGE" && "$LIVE_IMAGE" != "$IMAGE" ]]; then
   log_warn "image changes $LIVE_IMAGE → $IMAGE; stopping the running revision so only one Zulip migrates"
   RESTORE_POINT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   summary "- **$SERVER**: upgrade from \`$LIVE_IMAGE\`; PostgreSQL point-in-time restore target before the upgrade: \`$RESTORE_POINT\` (server \`$PG_NAME\`)"
-  for rev in "${(@f)$(az containerapp revision list -g "$RG" -n "$APP_NAME" --query '[?properties.active].name' -o tsv)}"; do
-    [[ -n "$rev" ]] || continue
+  # Listed first and checked: a failed list inside the for words would be silent and run
+  # old and new Zulip side by side while the new one migrates.
+  REVS_RAW="$(az_retry containerapp revision list -g "$RG" -n "$APP_NAME" --query '[?properties.active].name' -o tsv)" \
+    || die "could not list $APP_NAME's active revisions; not starting $IMAGE beside a running Zulip"
+  typeset -a REVS
+  REVS=("${(@f)REVS_RAW}"); REVS=("${(@)REVS:#}")
+  (( ${#REVS} )) || log_info "no active revision to stop"
+  for rev in "${REVS[@]}"; do
     az_retry containerapp revision deactivate -g "$RG" -n "$APP_NAME" --revision "$rev" --output none
     log_ok "deactivated $rev"
   done
@@ -182,7 +198,7 @@ log_step "5/6 Deploy the app"
 OUT="$(deploy app "$P_APP")"
 FQDN="$(print -r -- "$OUT" | jq -er .appFqdn.value)"
 REVISION="$(print -r -- "$OUT" | jq -er .latestRevision.value)"
-log_info "waiting for revision $REVISION (first boot can take ~10 minutes)"
+log_info "waiting for revision $REVISION (first boot can take ~10 minutes; up to ${HEALTH_TIMEOUT:-1500}s)"
 waited=0 unhealthy=0
 while true; do
   state="$(az containerapp revision show -g "$RG" -n "$APP_NAME" --revision "$REVISION" \
@@ -193,21 +209,27 @@ while true; do
       az containerapp logs show -g "$RG" -n "$APP_NAME" --revision "$REVISION" --container zulip --tail 60 2>/dev/null || true
       die "revision $REVISION is $state" ;;
     *Unhealthy*)
-      # Probes fail while first boot runs puppet and migrations; only a sustained
-      # Unhealthy (about 3 minutes) is a failure.
+      # Probes fail while first boot runs puppet and migrations, and the startup probe
+      # (infra/server.bicep) allows about 21 minutes for that: only Unhealthy for about
+      # as long (66 polls of 20 s = 22 min) is a failure. Failed/Degraded stop at once.
       unhealthy=$(( unhealthy + 1 ))
-      if (( unhealthy >= ${UNHEALTHY_LIMIT:-9} )); then
+      if (( unhealthy >= ${UNHEALTHY_LIMIT:-66} )); then
         az containerapp logs show -g "$RG" -n "$APP_NAME" --revision "$REVISION" --container zulip --tail 60 2>/dev/null || true
         die "revision $REVISION is $state"
       fi ;;
     *) unhealthy=0 ;;
   esac
-  if (( waited >= ${HEALTH_TIMEOUT:-900} )); then
+  if (( waited >= ${HEALTH_TIMEOUT:-1500} )); then
     die "revision $REVISION not healthy after ${waited}s (state: ${state:-unknown})"
   fi
-  sleep 20; waited=$(( waited + 20 ))
+  sleep "${HEALTH_POLL:-20}"; waited=$(( waited + ${HEALTH_POLL:-20} ))
 done
 log_ok "revision $REVISION healthy"
+if $RESTORED_DOMAINS; then
+  # The bindings live on the app again; an old save must not resurrect them later.
+  print -rn -- '[]' | kv_secret_set_from_stdin "$SERVER-custom-domains"
+  log_ok "cleared $SERVER-custom-domains (bindings restored)"
+fi
 
 if [[ "$(jqs .easy_auth)" != true ]] && \
    [[ "$(az containerapp auth show -g "$RG" -n "$APP_NAME" --query platform.enabled -o tsv 2>/dev/null || true)" == true ]]; then

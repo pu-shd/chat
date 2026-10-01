@@ -161,9 +161,57 @@ az_login() {
   [[ "$tenant" == "$TENANT_ID" ]] || die "signed in to tenant $tenant, config expects $TENANT_ID"
 }
 
+# signed_in_object_id — the Entra object id of whoever az is signed in as: the user, or
+# the service principal of the logged-in client id (CI).
+typeset -g CHAT_ME_OID=""
+signed_in_object_id() {
+  if [[ -z "$CHAT_ME_OID" ]]; then
+    if [[ "$(az account show --query user.type -o tsv)" == user ]]; then
+      CHAT_ME_OID="$(az_retry ad signed-in-user show --query id -o tsv)"
+    else
+      CHAT_ME_OID="$(az_retry ad sp show --id "$(az account show --query user.name -o tsv)" --query id -o tsv)"
+    fi
+  fi
+  [[ -n "$CHAT_ME_OID" ]] || { log_error "could not read the signed-in principal's object id"; return 2; }
+  print -r -- "$CHAT_ME_OID"
+}
+
+# entra_app_by_name <display-name> — the appId of THE app registration with that display
+# name, or nothing if there is none. Display names are not unique and anyone in the tenant
+# can register one, so a match is used only if it is the only one AND the signed-in
+# principal is among its owners (the scripts' own apps have their creator as owner).
+# Otherwise it explains and returns 2: callers decide whether that ends the script
+# (`APP_ID="$(entra_app_by_name X)" || die ...`). It never guesses.
+entra_app_by_name() {
+  local name="$1" raw me
+  typeset -a ids owners
+  raw="$(az_retry ad app list --display-name "$name" --query '[].appId' -o tsv)" \
+    || { log_error "could not list app registrations named $name"; return 2; }
+  ids=("${(@f)raw}"); ids=("${(@)ids:#}")
+  (( ${#ids} )) || return 0
+  if (( ${#ids} > 1 )); then
+    log_error "${#ids} app registrations are named $name (${(j:, :)ids}); refusing to pick one. Delete the impostor(s) (az ad app delete --id <appId>) or rename them"
+    return 2
+  fi
+  me="$(signed_in_object_id)" || return 2
+  raw="$(az_retry ad app owner list --id "${ids[1]}" --query '[].id' -o tsv)" \
+    || { log_error "could not list the owners of $name (${ids[1]})"; return 2; }
+  owners=("${(@f)raw}")
+  if (( ! ${owners[(Ie)$me]} )); then
+    log_error "app registration $name (${ids[1]}) is not owned by you ($me), so it may not be ours: if it is, add yourself as an owner (az ad app owner add --id ${ids[1]} --owner-object-id $me, by a current owner or an Entra admin); if it is not, delete it or have it renamed"
+    return 2
+  fi
+  print -r -- "${ids[1]}"
+}
+
 # az_retry <az args...> — retries only what is transient (after meet's ci.yml).
+# Server-side throttling/conflicts are always safe to retry: Azure refused the request.
+# A client-side timeout or connection reset is not, for `containerapp job start`: the
+# request may have reached Azure, and retrying could start a second execution.
 az_retry() {
   local attempt=1 max="${AZ_RETRY_MAX:-5}" out rc errf
+  local transient='OperationInProgress|ContainerAppOperationInProgress|TooManyRequests|Too Many Requests|(^|[^0-9])429([^0-9]|$)|temporarily unavailable|RetryableError'
+  [[ "${1:-} ${2:-} ${3:-}" == "containerapp job start" ]] || transient+='|Connection reset|Connection aborted|timed out'
   errf="$(mktemp)"
   while true; do
     # stdout only is returned: az warnings (e.g. "a new Bicep release") must not end up
@@ -175,7 +223,7 @@ az_retry() {
       print -r -- "$out"
       return 0
     fi
-    if (( attempt >= max )) || ! grep -qiE 'OperationInProgress|ContainerAppOperationInProgress|TooManyRequests|429|Connection reset|timed out|temporarily unavailable|RetryableError' "$errf"; then
+    if (( attempt >= max )) || ! grep -qiE "$transient" "$errf"; then
       cat "$errf" >&2
       rm -f "$errf"
       return $rc
@@ -186,8 +234,24 @@ az_retry() {
   done
 }
 
+# az_exists <az show args...> — 0 if the resource exists, 1 if Azure says it does not.
+# Any other failure (auth, network, throttling that outlasted az_retry) ends the script:
+# a "missing" guessed from an error would make a caller recreate, overwrite or forget
+# something that is live (e.g. treat a running server as a first deploy).
+AZ_NOT_FOUND='ResourceNotFound|ResourceGroupNotFound|NotFound\)|was not found|could not be found|does not exist'
+az_exists() {
+  local errf rc=0
+  errf="$(mktemp)"
+  az_retry "$@" >/dev/null 2>"$errf" || rc=$?
+  if (( rc == 0 )); then rm -f "$errf"; return 0; fi
+  if grep -qiE "$AZ_NOT_FOUND" "$errf"; then rm -f "$errf"; return 1; fi
+  cat "$errf" >&2
+  rm -f "$errf"
+  die "az ${1:-} ${2:-} ${3:-} failed (exit $rc) without saying the resource is missing; refusing to guess"
+}
+
 kv_secret_exists() {
-  az keyvault secret show --vault-name "$KV_NAME" --name "$1" --query id -o tsv >/dev/null 2>&1
+  az_exists keyvault secret show --vault-name "$KV_NAME" --name "$1" --query id -o tsv
 }
 
 kv_secret_get() {
@@ -197,19 +261,24 @@ kv_secret_get() {
 # kv_secret_set_from_stdin <name> [extra az args...] — value on stdin, via a 0600 file,
 # never argv. Extra args (e.g. --expires 2028-09-30T00:00:00Z) pass through to az.
 kv_secret_set_from_stdin() {
-  local name="$1" tmp
+  local name="$1" tmp rc=0
   shift
-  tmp="$(mktemp)"
-  chmod 600 "$tmp"
-  # One trailing newline (from `print`/`echo`/az tsv) is never part of a secret.
-  "$CHAT_PY" -c 'import sys; d = sys.stdin.buffer.read(); sys.stdout.buffer.write(d[:-1] if d.endswith(b"\n") else d)' > "$tmp"
-  if [[ ! -s "$tmp" ]]; then
-    rm -f "$tmp"
-    die "refusing to store an empty value in Key Vault secret $name"
-  fi
+  # Before the plaintext file exists: this can end the script, which skips `always`.
   kv_recover_if_deleted "$name"
-  az keyvault secret set --vault-name "$KV_NAME" --name "$name" --file "$tmp" --encoding utf-8 "$@" --output none
-  rm -f "$tmp"
+  tmp="$(mktemp)"
+  # errexit and exit skip an `always` block (zsh), so failures inside are caught with
+  # `|| rc=$?` and the plaintext file is removed on every path.
+  {
+    chmod 600 "$tmp" || rc=$?
+    # One trailing newline (from `print`/`echo`/az tsv) is never part of a secret.
+    (( rc )) || "$CHAT_PY" -c 'import sys; d = sys.stdin.buffer.read(); sys.stdout.buffer.write(d[:-1] if d.endswith(b"\n") else d)' > "$tmp" || rc=$?
+    if (( rc == 0 )) && [[ ! -s "$tmp" ]]; then rc=-1; fi
+    (( rc )) || az keyvault secret set --vault-name "$KV_NAME" --name "$name" --file "$tmp" --encoding utf-8 "$@" --output none || rc=$?
+  } always {
+    rm -f "$tmp"
+  }
+  (( rc != -1 )) || die "refusing to store an empty value in Key Vault secret $name"
+  (( rc == 0 )) || die "could not store Key Vault secret $name (exit $rc)"
 }
 
 random_secret() { print -rn -- "$(openssl rand -hex "${1:-32}")"; }
@@ -247,7 +316,9 @@ env_verification_id() {
   az containerapp env show -g "$RG" -n "$ENV_NAME" --query properties.customDomainConfiguration.customDomainVerificationId -o tsv
 }
 
-app_exists() { az containerapp show -g "$RG" -n "$APP_NAME" --query id -o tsv >/dev/null 2>&1; }
+# A transient az error must not read as "no app": deploy-server would treat a live server
+# as a first deploy (dropping its custom domains and skipping the maintenance window).
+app_exists() { az_exists containerapp show -g "$RG" -n "$APP_NAME" --query id -o tsv; }
 
 # run_job <job> <container> [args...] — start a manual job execution, wait for it and
 # print the JSON from its last "CHAT-RESULT:" log line. Fails if the execution fails,

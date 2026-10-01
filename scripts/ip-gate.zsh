@@ -45,7 +45,23 @@ FALLBACK_URL="$(jq -r '.ip_gate.fallback_url // empty' "$PLATFORM_JSON")"
 # pugwips signs with keyless cosign from its resolve workflow (scripts/verify.sh there).
 SIG_IDENTITY_RE="${PUGWIPS_SIGNER_RE:-^https://github\\.com/${PUGWIPS_REPO//./\\.}/\\.github/workflows/resolve\\.yml@refs/heads/main\$}"
 SIG_ISSUER="https://token.actions.githubusercontent.com"
-TEMP_RULE="ci-runner-temp"
+# The temporary rule is this run's own (deploy smoke tests and keepalive may overlap on
+# one app): ci-temp-<run id>-<attempt> in Actions, ci-temp-local otherwise. Only [0-9]
+# survives from the ids, and the name is cut to 32 characters (Container Apps' limit).
+# `--apply` keeps every temporary rule (a running smoke test needs its own) but drops
+# ones whose description says they are older than TEMP_RULE_MAX_AGE seconds (default 6h).
+TEMP_PREFIX="ci-temp-"
+if [[ -n "${GITHUB_RUN_ID:-}" ]]; then
+  gh_run="${GITHUB_RUN_ID}" gh_attempt="${GITHUB_RUN_ATTEMPT:-1}"
+  run_id="${gh_run//[^0-9]/}" attempt="${gh_attempt//[^0-9]/}"
+  [[ -n "$run_id" ]] || die "GITHUB_RUN_ID '$GITHUB_RUN_ID' has no digits"
+  TEMP_RULE="${TEMP_PREFIX}${run_id}-${attempt:-1}"
+else
+  TEMP_RULE="${TEMP_PREFIX}local"
+fi
+TEMP_RULE="${TEMP_RULE[1,32]}"
+TEMP_RULE_MAX_AGE="${TEMP_RULE_MAX_AGE:-21600}"
+[[ "$TEMP_RULE_MAX_AGE" =~ '^[0-9]+$' ]] || die "TEMP_RULE_MAX_AGE must be a number of seconds"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -236,8 +252,10 @@ apply_rules() {
   local desired="$1" current name
   current="$(live_rules)"
   [[ -n "$current" && "$current" != null ]] || current='[]'
-  # Upsert every desired rule, then remove whatever is no longer wanted (never the
-  # temporary CI rule, which its own step removes).
+  # Upsert every desired rule, then remove whatever is no longer wanted. Temporary CI
+  # rules are kept (their own step removes them) unless stamped older than
+  # TEMP_RULE_MAX_AGE, i.e. left behind by a run that died; the legacy shared
+  # ci-runner-temp name is treated the same way (it carries no stamp, so it is kept).
   for row in "${(@f)$(print -r -- "$desired" | jq -c '.[]')}"; do
     [[ -n "$row" ]] || continue
     az_retry containerapp ingress access-restriction set -g "$RG" -n "$APP_NAME" \
@@ -246,8 +264,14 @@ apply_rules() {
       --description "$(print -r -- "$row" | jq -r .description)" \
       --action Allow --output none
   done
-  for name in "${(@f)$(jq -rn --argjson c "$current" --argjson d "$desired" --arg t "$TEMP_RULE" \
-      '[$c[].name] - [$d[].name] - [$t] | .[]')}"; do
+  local stale  # assigned first, so a jq failure stops here instead of removing nothing
+  stale="$(jq -rn --argjson c "$current" --argjson d "$desired" --arg p "$TEMP_PREFIX" \
+      --argjson now "$(date +%s)" --argjson max "$TEMP_RULE_MAX_AGE" '
+      def temp: .name == "ci-runner-temp" or (.name | startswith($p));
+      def stamp: ((.description // "") | capture("created (?<t>[0-9]+)")? | .t | tonumber) // null;
+      def fresh: stamp as $s | $s == null or ($now - $s) <= $max;
+      [$c[] | select((temp and fresh) | not) | .name] - [$d[].name] | .[]')"
+  for name in "${(@f)stale}"; do
     [[ -n "$name" ]] || continue
     az_retry containerapp ingress access-restriction remove -g "$RG" -n "$APP_NAME" --rule-name "$name" --output none
     log_info "removed stale rule $name"
@@ -270,16 +294,16 @@ case "$MODE" in
     [[ "$TEMP_IP" =~ '^([0-9]{1,3}\.){3}[0-9]{1,3}$' ]] || die "--add-temp needs a bare IPv4 address"
     az_login
     az_retry containerapp ingress access-restriction set -g "$RG" -n "$APP_NAME" --rule-name "$TEMP_RULE" \
-      --ip-address "$TEMP_IP/32" --description "Temporary: CI smoke test" --action Allow --output none
-    log_ok "temporarily allowed $TEMP_IP"
+      --ip-address "$TEMP_IP/32" --description "Temporary: CI smoke test, created $(date +%s)" --action Allow --output none
+    log_ok "temporarily allowed $TEMP_IP ($TEMP_RULE)"
     ;;
   remove-temp)
     az_login
     if live_rules | jq -e --arg t "$TEMP_RULE" '(. // []) | any(.name == $t)' >/dev/null; then
       az_retry containerapp ingress access-restriction remove -g "$RG" -n "$APP_NAME" --rule-name "$TEMP_RULE" --output none
-      log_ok "removed temporary rule"
+      log_ok "removed temporary rule $TEMP_RULE"
     else
-      log_info "no temporary rule present"
+      log_info "no temporary rule $TEMP_RULE present"
     fi
     ;;
 esac

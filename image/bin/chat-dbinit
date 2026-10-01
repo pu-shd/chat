@@ -10,9 +10,19 @@
 #
 # Env: PGHOST PGUSER (admin) PGADMIN_PASSWORD_FILE DB_NAME DB_USER DB_PASSWORD_FILE
 #      DB_ACTION=ensure|drop   (drop is used only by teardown --purge)
+#
+# DB_NAME and DB_USER must be plain lower-case identifiers; they are only ever passed
+# to psql as variables (:'x' / format %I), never spliced into SQL text, and the
+# validation keeps every CHAT-RESULT line valid JSON.
 set -eu
 
 : "${PGHOST:?}" "${PGUSER:?}" "${PGADMIN_PASSWORD_FILE:?}" "${DB_NAME:?}" "${DB_USER:?}" "${DB_PASSWORD_FILE:?}"
+for ident in "$DB_NAME" "$DB_USER"; do
+    if ! printf '%s' "$ident" | grep -Eqx '[a-z_][a-z0-9_]{0,62}' || [ "$(printf '%s' "$ident" | wc -l)" -ne 0 ]; then
+        echo "CHAT-RESULT: {\"ok\": false, \"error\": \"DB_NAME and DB_USER must match ^[a-z_][a-z0-9_]{0,62}\$\"}"
+        exit 2
+    fi
+done
 PGPASSWORD="$(cat "$PGADMIN_PASSWORD_FILE")"
 export PGPASSWORD PGSSLMODE="${PGSSLMODE:-require}" PGDATABASE=postgres
 DB_PASSWORD="$(cat "$DB_PASSWORD_FILE")"
@@ -36,9 +46,19 @@ SELECT format('CREATE DATABASE %I OWNER %I ENCODING UTF8 LC_COLLATE %L LC_CTYPE 
               :'dbname', :'dbuser', 'C.UTF-8', 'C.UTF-8')
  WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = :'dbname') \gexec
 SELECT format('ALTER DATABASE %I OWNER TO %I', :'dbname', :'dbuser') \gexec
+-- Each server's database is reachable only by its own role: PUBLIC's default CONNECT
+-- and TEMP go (the owner keeps its own). The implicit grant to PUBLIC is the owner's,
+-- so only the owner can revoke it; the admin is not a superuser, so SET ROLE first.
+SELECT format('SET ROLE %I', :'dbuser') \gexec
+SELECT format('REVOKE ALL ON DATABASE %I FROM PUBLIC', :'dbname') \gexec
+RESET ROLE;
 SQL
-    collate="$(psql -At -v dbname="$DB_NAME" -c "SELECT datcollate FROM pg_database WHERE datname = '$DB_NAME'")"
+    collate="$(psql -At -v ON_ERROR_STOP=1 -v dbname="$DB_NAME" <<'SQL'
+SELECT datcollate FROM pg_database WHERE datname = :'dbname';
+SQL
+)"
     if [ "$collate" != "C.UTF-8" ]; then
+        collate="$(printf '%s' "$collate" | tr -cd 'A-Za-z0-9._@-')"  # keep the JSON valid
         echo "CHAT-RESULT: {\"ok\": false, \"error\": \"database $DB_NAME has collation '$collate', Zulip needs C.UTF-8\"}"
         exit 1
     fi

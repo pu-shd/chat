@@ -7,7 +7,7 @@ import subprocess
 
 import pytest
 
-from conftest import ROOT, az_basics
+from conftest import ME, NOT_FOUND, ROOT, az_basics, entra_app
 from test_scripts import DOMAIN, IMAGE, deploy_rules
 
 API_KEY = "hc-API-SENTINEL-77"
@@ -47,7 +47,7 @@ def test_sync_creates_missing_and_updates_existing(run, dept, shims):
 def test_sync_without_api_key_fails_loudly(run, dept, shims):
     enable_hc(dept)
     az_basics(shims)
-    shims.on("az", r"^keyvault secret show .*healthchecks-api-key", exit=3)
+    shims.on("az", r"^keyvault secret show .*healthchecks-api-key", **NOT_FOUND)
     r = run("healthchecks.zsh", "--config", str(dept.path), "--sync")
     assert r.returncode != 0 and "no Healthchecks API key" in r.stderr
 
@@ -112,7 +112,7 @@ def test_deploy_requires_the_ping_key_when_enabled(run, dept, shims):
 
 def test_deploy_with_healthchecks_deploys_the_pinger(run, dept, shims):
     enable_hc(dept)
-    shims.on("az", r"^keyvault secret show .*healthchecks-api-key --query id", exit=3)
+    shims.on("az", r"^keyvault secret show .*healthchecks-api-key --query id", **NOT_FOUND)
     deploy_rules(shims)
     r = run("deploy-server.zsh", "--config", str(dept.path), "--server", "dept", "--image", IMAGE)
     assert r.returncode == 0, r.stderr
@@ -189,13 +189,13 @@ def test_keepalive_warns_early(run, dept, shims):
 
 def test_teardown_needs_the_department_phrase(run, dept, shims):
     r = run("teardown.zsh", "--config", str(dept.path), env={"CHAT_CONFIRM": "TEARDOWN other"})
-    assert r.returncode != 0 and "did not match 'TEARDOWN orfe'" in r.stderr
+    assert r.returncode != 0 and "did not match 'TEARDOWN orfe ALL'" in r.stderr
     assert shims.calls("az") == []
 
 
 def test_purge_phrase_is_different(run, dept, shims):
     r = run("teardown.zsh", "--config", str(dept.path), "--purge", env={"CHAT_CONFIRM": "TEARDOWN orfe"})
-    assert r.returncode != 0 and "'TEARDOWN orfe PURGE'" in r.stderr
+    assert r.returncode != 0 and "'TEARDOWN orfe ALL PURGE'" in r.stderr
 
 
 def test_platform_requires_purge_and_every_server(run, dept):
@@ -211,9 +211,12 @@ def test_preserve_teardown_runs_each_server_and_leaves_entra(run, dept, shims):
     az_basics(shims)
     shims.on("az", r"^containerapp show -g orfe-chat-rg -n orfe-chat-\w+ --query id", "/app")
     shims.on("az", r"^containerapp delete ")
-    shims.on("az", r"^containerapp job show ", exit=3)
+    shims.on("az", r"^containerapp job show ", **NOT_FOUND)
     shims.on("az", r"^ad app list ", "")
-    r = run("teardown.zsh", "--config", str(dept.path), env={"CHAT_CONFIRM": "TEARDOWN orfe"})
+    shims.on("az", r"^containerapp show -g orfe-chat-rg -n orfe-chat-\w+ --query properties\.configuration\.ingress\.customDomains", "[]")
+    shims.on("az", r"^keyvault secret show-deleted ", **NOT_FOUND)
+    shims.on("az", r"^keyvault secret set ")
+    r = run("teardown.zsh", "--config", str(dept.path), env={"CHAT_CONFIRM": "TEARDOWN orfe ALL"})
     assert r.returncode == 0, r.stderr
     deleted = [c.split(" -n ")[1].split()[0] for c in shims.joined("az") if c.startswith("containerapp delete")]
     assert deleted == ["orfe-chat-dept", "orfe-chat-groups", "orfe-chat-lab"]
@@ -223,12 +226,12 @@ def test_preserve_teardown_runs_each_server_and_leaves_entra(run, dept, shims):
 
 def test_entra_flag_deletes_sign_in_apps(run, dept, shims):
     az_basics(shims)
-    shims.on("az", r"^containerapp show ", exit=3)
-    shims.on("az", r"^containerapp job show ", exit=3)
-    shims.on("az", r"^ad app list --display-name orfe-chat-lab-zulip", "44444444-4444-4444-4444-444444444444")
+    shims.on("az", r"^containerapp show ", **NOT_FOUND)
+    shims.on("az", r"^containerapp job show ", **NOT_FOUND)
+    entra_app(shims, "orfe-chat-lab-zulip", "44444444-4444-4444-4444-444444444444")
     shims.on("az", r"^ad app list ", "")
     shims.on("az", r"^ad app delete ")
-    r = run("teardown.zsh", "--config", str(dept.path), "--server", "lab", "--entra", env={"CHAT_CONFIRM": "TEARDOWN orfe"})
+    r = run("teardown.zsh", "--config", str(dept.path), "--server", "lab", "--entra", env={"CHAT_CONFIRM": "TEARDOWN orfe lab"})
     assert r.returncode == 0, r.stderr
     assert [c for c in shims.joined("az") if c.startswith("ad app delete")] == \
         ["ad app delete --id 44444444-4444-4444-4444-444444444444"]
@@ -248,9 +251,9 @@ def grant_rules(sh, *, missing_secrets=(), existing_identity=False, granted=()):
     az_basics(sh)
     sh.on("az", r"^acr show -n orfechatacr -g orfe-chat-rg --query id", "/subs/x/registries/orfechatacr")
     sh.on("az", r"^keyvault show -n orfe-chat-kv ", "/subs/x/vaults/orfe-chat-kv")
-    sh.on("az", r"^keyvault secret show-deleted ", exit=3)
+    sh.on("az", r"^keyvault secret show-deleted ", **NOT_FOUND)
     for s in missing_secrets:
-        sh.on("az", rf"^keyvault secret show --vault-name orfe-chat-kv --name {s} --query id", exit=3, times=1)
+        sh.on("az", rf"^keyvault secret show --vault-name orfe-chat-kv --name {s} --query id", **NOT_FOUND, times=1)
     sh.on("az", r"^keyvault secret show --vault-name orfe-chat-kv --name \S+ --query id", "id")
     sh.on("az", r"^keyvault secret set ")
     if existing_identity:
@@ -258,7 +261,7 @@ def grant_rules(sh, *, missing_secrets=(), existing_identity=False, granted=()):
         sh.on("az", r"^identity show ", "{}")
     else:
         sh.on("az", r"^identity show -g orfe-chat-rg -n \S+ --query principalId", "pid-9")
-        sh.on("az", r"^identity show -g orfe-chat-rg -n \S+$", exit=3)
+        sh.on("az", r"^identity show -g orfe-chat-rg -n \S+ --query id -o tsv$", **NOT_FOUND)
     sh.on("az", r"^identity create ")
     for s in granted:
         sh.on("az", rf"^role assignment list .*/secrets/{s} ", "/ra/x")
@@ -302,7 +305,7 @@ def test_grant_access_is_idempotent(run, dept, shims):
 
 def test_grant_access_needs_operator_secrets_first(run, dept, shims):
     az_basics(shims)
-    shims.on("az", r"^keyvault secret show --vault-name orfe-chat-kv --name dept-oidc-secret --query id", exit=3)
+    shims.on("az", r"^keyvault secret show --vault-name orfe-chat-kv --name dept-oidc-secret --query id", **NOT_FOUND)
     grant_rules(shims)
     r = run("grant-access.zsh", "--config", str(dept.path), "--server", "dept")
     assert r.returncode != 0 and "create these first: dept-oidc-secret" in r.stderr
@@ -333,16 +336,16 @@ def acs_rules(sh, *, states, linked="[]"):
                                 "DKIM": {"type": "CNAME", "name": "selector1-azurecomm-prod-net._domainkey", "value": "selector1.example", "ttl": 3600}}})
     sh.on("az", r"^communication email domain initiate-verification ")
     sh.on("az", r"^communication update ")
-    sh.on("az", r"^ad app list --display-name orfe-chat-acs-smtp", "55555555-5555-5555-5555-555555555555")
+    entra_app(sh, "orfe-chat-acs-smtp", "55555555-5555-5555-5555-555555555555")
     sh.on("az", r"^ad sp show --id \S+ --query id", "sp-acs")
     sh.on("az", r"^ad sp show ", "{}")
     sh.on("az", r"^role assignment list ", "")
     sh.on("az", r"^role assignment create ")
-    sh.on("az", r"^keyvault secret show .*email-password --query id", exit=3, times=1)
-    sh.on("az", r"^keyvault secret show-deleted ", exit=3)
+    sh.on("az", r"^keyvault secret show .*email-password --query id", **NOT_FOUND, times=1)
+    sh.on("az", r"^keyvault secret show-deleted ", **NOT_FOUND)
     sh.on("az", r"^ad app credential reset ", {"password": "ACS-SECRET-1", "end": "2028-09-30T00:00:00Z"})
     sh.on("az", r"^keyvault secret set ")
-    sh.on("az", r"^communication smtp-username show ", exit=3)
+    sh.on("az", r"^communication smtp-username show ", **NOT_FOUND)
     sh.on("az", r"^communication smtp-username create ")
 
 
@@ -393,15 +396,35 @@ def test_acs_refuses_without_acs_provider(run, dept, shims):
 # ---------------------------------------------------------------- build-image.zsh
 
 
-def build_rules(sh, *, built=False, sidecars_present=False):
+def sidecar_pins(root=ROOT):
+    """{<repo>:<tag> in the registry: (docker.io/<repo>, pinned digest)} from image/sidecars.json."""
+    data = json.loads((root / "image" / "sidecars.json").read_text())
+    out = {}
+    for k, v in data.items():
+        if k.startswith("_"):
+            continue
+        ref, digest = v.split("@")
+        out[ref.removeprefix("docker.io/")] = (ref.rsplit(":", 1)[0], digest)
+    return out
+
+
+def build_rules(sh, *, built=False, sidecars_present=False, registry_digest=None):
+    """registry_digest: what the registry reports for an existing sidecar tag (default: the pin)."""
+    import re
     az_basics(sh)
     sh.on("az", r"^acr show -n orfechatacr -g orfe-chat-rg --query loginServer", "orfechatacr.azurecr.io")
     if built:
         sh.on("az", r"^acr repository show -n orfechatacr --image chat:", "sha256:" + "f" * 64)
     else:
-        sh.on("az", r"^acr repository show -n orfechatacr --image chat:", exit=3, times=1)
+        sh.on("az", r"^acr repository show -n orfechatacr --image chat:", **NOT_FOUND, times=1)
         sh.on("az", r"^acr repository show -n orfechatacr --image chat:", "sha256:" + "f" * 64)
-    sh.on("az", r"^acr repository show ", "sha256:" + "1" * 64 if sidecars_present else "", exit=0 if sidecars_present else 3)
+    for target, (_, digest) in sidecar_pins().items():
+        rule = rf"^acr repository show -n orfechatacr --image {re.escape(target)} "
+        if sidecars_present:
+            sh.on("az", rule, registry_digest or digest)
+        else:
+            sh.on("az", rule, **NOT_FOUND, times=1)  # absent, then the imported (pinned) digest
+            sh.on("az", rule, registry_digest or digest)
     sh.on("az", r"^acr build ")
     sh.on("az", r"^acr import ")
     sh.on("az", r"^acr repository update ")
@@ -437,8 +460,12 @@ def test_build_image_builds_once_locks_and_imports_sidecars(run, dept, shims, tm
     build = [c for c in calls if c.startswith("acr build")]
     assert len(build) == 1 and f"-t chat:v0.3.0-{sha[:7]} --platform linux/amd64 --build-arg CHAT_TEMPLATE_SHA={sha}" in build[0]
     imports = [c for c in calls if c.startswith("acr import")]
-    assert any("--source docker.io/library/redis:" in c and "--image library/redis:" in c for c in imports)
-    assert any("--source docker.io/curlimages/curl:" in c for c in imports) and len(imports) == 5
+    pins = sidecar_pins()
+    assert len(imports) == len(pins) == 5
+    for target, (repo, digest) in pins.items():
+        # Imported BY DIGEST from Docker Hub; tagged <repo>:<tag> (no digest) in the registry.
+        assert any(f"--source {repo}@{digest} --image {target} " in c for c in imports), (target, imports)
+    assert not any(":" in c.split("--source ")[1].split("@")[0].removeprefix("docker.io/") for c in imports)
     locks = [c for c in calls if c.startswith("acr repository update")]
     assert all("--write-enabled false --delete-enabled false" in c for c in locks) and len(locks) == 6
 
@@ -449,6 +476,35 @@ def test_build_image_reuses_an_existing_tag(run, dept, shims, tmp_path):
     r = run_in(root, run, "build-image.zsh", "--config", str(dept.path), "--lock", str(template_at(tmp_path, sha)))
     assert r.returncode == 0, r.stderr
     assert not any(c.startswith(("acr build", "acr import")) for c in shims.joined("az"))
+
+
+def test_build_image_refuses_a_sidecar_tag_holding_another_digest(run, dept, shims, tmp_path):
+    root, sha = fake_template(tmp_path)
+    build_rules(shims, built=True, sidecars_present=True, registry_digest="sha256:" + "9" * 64)
+    r = run_in(root, run, "build-image.zsh", "--config", str(dept.path), "--lock", str(template_at(tmp_path, sha)))
+    assert r.returncode != 0 and "registry tags are locked, so pin a new tag" in r.stderr
+    assert not any(c.startswith("acr import") for c in shims.joined("az"))
+
+
+def test_build_image_refuses_an_import_that_lands_another_digest(run, dept, shims, tmp_path):
+    root, sha = fake_template(tmp_path)
+    build_rules(shims, built=True, registry_digest="sha256:" + "9" * 64)
+    r = run_in(root, run, "build-image.zsh", "--config", str(dept.path), "--lock", str(template_at(tmp_path, sha)))
+    assert r.returncode != 0 and "not the pinned sha256:" in r.stderr
+
+
+def test_build_image_refuses_an_unpinned_sidecar(run, dept, shims, tmp_path):
+    root, sha = fake_template(tmp_path)
+    side = root / "image" / "sidecars.json"
+    data = json.loads(side.read_text())
+    data["redis"] = data["redis"].split("@")[0]
+    side.write_text(json.dumps(data, indent=2))
+    g = lambda *a: subprocess.run(["git", "-C", str(root), *a], check=True, capture_output=True, text=True).stdout.strip()
+    g("-c", "user.name=t", "-c", "user.email=t@example.edu", "commit", "-qam", "unpinned")
+    build_rules(shims, built=True)
+    r = run_in(root, run, "build-image.zsh", "--config", str(dept.path), "--lock", str(template_at(tmp_path, g("rev-parse", "HEAD"))))
+    assert r.returncode != 0 and "is not pinned as docker.io/<repo>:<tag>@sha256:<digest>" in r.stderr
+    assert not any(c.startswith("acr import") for c in shims.joined("az"))
 
 
 def test_build_image_refuses_a_checkout_that_is_not_the_locked_commit(run, dept, shims, tmp_path):

@@ -18,7 +18,12 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import render  # noqa: E402
 
-SHIMMED = ["az", "gh", "cosign", "dig", "curl", "docker", "docker-compose", "lsof"]
+SHIMMED = ["az", "gh", "cosign", "dig", "curl", "docker", "docker-compose", "lsof", "security"]
+
+# What az says (stderr, exit 3) for a resource that does not exist. Scripts tell this apart
+# from every other failure (az_exists), so a test's "missing" must look like it.
+NOT_FOUND = {"exit": 3, "stderr": "ERROR: (ResourceNotFound) The Resource 'x' under resource group 'orfe-chat-rg' was not found."}
+ME = "0b0b0b0b-0000-4000-8000-00000000me00"  # the signed-in operator's object id
 
 
 class Dept:
@@ -95,6 +100,14 @@ def az_basics(sh: Shims) -> Shims:
     sh.on("az", r"^account set ")
     sh.on("az", r"^account show --query tenantId", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
     sh.on("az", r"^account show --query user.type", "user")
+    sh.on("az", r"^ad signed-in-user show --query id -o tsv$", ME)
+    return sh
+
+
+def entra_app(sh: Shims, name: str, app_id: str, owners=(ME,)) -> Shims:
+    """One app registration called `name`, owned by `owners` (the operator by default)."""
+    sh.on("az", rf"^ad app list --display-name {name} --query \[\]\.appId", app_id)
+    sh.on("az", rf"^ad app owner list --id {app_id} --query \[\]\.id", "\n".join(owners))
     return sh
 
 

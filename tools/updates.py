@@ -3,13 +3,15 @@
 
     updates.py zulip [--apply] [--root DIR]
         pu-shd/chat itself: the Zulip image (image/Dockerfile, tag + digest), the
-        sidecar images in image/sidecars.json (newest release in the SAME major only;
-        newer majors are reported, never applied), and the bicep CLI in tests/Dockerfile.
+        sidecar images in image/sidecars.json (tag + multi-arch digest, moved together;
+        newest release in the SAME major only; newer majors are reported, never applied),
+        and the bicep CLI in tests/Dockerfile.
         With a new Zulip version it also regenerates tools/zulip_reserved.py.
     updates.py template --config-repo DIR [--apply]
         a config repo: the latest pu-shd/chat release. Rewrites template.lock (from the
         release's template.lock asset: ref and commit sha) and pins every
-        `uses: pu-shd/chat/...@<sha> # <tag>`. Refuses a release whose tag has moved.
+        `uses: pu-shd/chat/...@<sha> # <tag>`. Refuses a release whose tag has moved,
+        whose commit is not on pu-shd/chat main, or that is not newer than the lock.
     updates.py pugwips --gateways FILE --snapshot FILE --mode MODE [--apply]
         a config repo: refresh the IP gate's static snapshot from a gateways.json that
         the caller has already signature-checked. Rewritten when the prefixes change,
@@ -120,6 +122,18 @@ def dockerhub_tags(repo: str, contains: str) -> list[str]:
     return tags
 
 
+def dockerhub_digest(repo: str, tag: str) -> str:
+    """The multi-arch index (manifest list) digest of docker.io/<repo>:<tag>."""
+    namespace = repo if "/" in repo else f"library/{repo}"
+    tok = get_json(f"https://auth.docker.io/token?service=registry.docker.io&scope=repository:{namespace}:pull")["token"]
+    status, headers, _ = http(f"https://registry-1.docker.io/v2/{namespace}/manifests/{tag}",
+                              {"Authorization": f"Bearer {tok}", "Accept": MANIFEST_ACCEPT}, method="HEAD")
+    digest = headers.get("docker-content-digest", "")
+    if status != 200 or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise UpdateError(f"docker.io/{namespace}:{tag}: no digest (HTTP {status})")
+    return digest
+
+
 def github_latest_release(repo: str) -> dict:
     return get_json(f"https://api.github.com/repos/{repo}/releases/latest", github_headers())
 
@@ -155,7 +169,9 @@ class Report:
 ZULIP_REPO = "zulip/zulip-server"
 ZULIP_TAG = re.compile(r"^(\d+)\.(\d+)-(\d+)$")
 DOCKERFILE_RE = re.compile(r"^ARG ZULIP_IMAGE=ghcr\.io/zulip/zulip-server:(?P<tag>[\w.-]+)@(?P<digest>sha256:[0-9a-f]{64})$", re.M)
-SIDECAR_RE = re.compile(r'^\s+"(?P<key>\w+)": "(?P<image>docker\.io/(?P<repo>[\w./-]+):(?P<tag>[\w.-]+))",?$', re.M)
+# Every sidecar is pinned by tag AND multi-arch digest: docker.io/<repo>:<tag>@sha256:<digest>.
+SIDECAR_RE = re.compile(r'^\s+"(?P<key>\w+)": "(?P<image>docker\.io/(?P<repo>[\w./-]+):(?P<tag>[\w.-]+)'
+                        r'@(?P<digest>sha256:[0-9a-f]{64}))",?$', re.M)
 BICEP_RE = re.compile(r"^ARG BICEP_VERSION=(v[\d.]+)$", re.M)
 
 
@@ -187,8 +203,14 @@ def check_zulip(root: Path, rep: Report) -> None:
         rep.lines.append(f"- Zulip `{cur_tag}` is current")
 
     sidecars = root / "image" / "sidecars.json"
-    for sm in SIDECAR_RE.finditer(sidecars.read_text()):
-        repo, tag = sm.group("repo"), sm.group("tag")
+    sidecar_text = sidecars.read_text()
+    entries = [k for k in json.loads(sidecar_text) if not k.startswith("_")]
+    matched = [sm.group("key") for sm in SIDECAR_RE.finditer(sidecar_text)]
+    if sorted(matched) != sorted(entries):
+        unpinned = sorted(set(entries) - set(matched))
+        raise UpdateError(f"{sidecars}: {', '.join(unpinned) or 'entries'} not pinned as docker.io/<repo>:<tag>@sha256:<digest>")
+    for sm in SIDECAR_RE.finditer(sidecar_text):
+        repo, tag, cur_digest = sm.group("repo"), sm.group("tag"), sm.group("digest")
         repo_name = repo.removeprefix("library/")
         num = re.match(r"^(\d+(?:\.\d+)*)(.*)$", tag)
         if not num:
@@ -201,9 +223,12 @@ def check_zulip(root: Path, rep: Report) -> None:
         same_major = [t for t in candidates if vkey(t)[0] == vkey(version)[0]]
         best = max(same_major, key=vkey) if same_major else tag
         if vkey(best) > vkey(tag):
-            rep.edit(sidecars, sm.group("image"), sm.group("image").replace(f":{tag}", f":{best}"))
+            # Tag and digest move together: the registry copy (<name>:<tag>) is immutable once
+            # imported (build-image.zsh locks it), so a new digest always comes with a new tag.
+            digest = dockerhub_digest(repo, best)
+            rep.edit(sidecars, sm.group("image"), f"docker.io/{repo}:{best}@{digest}")
             rep.title_parts.append(f"{repo_name} {tag} → {best}")
-            rep.lines.append(f"- sidecar **{repo_name}** `{tag}` → `{best}`")
+            rep.lines.append(f"- sidecar **{repo_name}** `{tag}` → `{best}` (`{digest[:19]}…`)")
         newest = max(candidates, key=vkey)
         if vkey(newest)[0] > vkey(version)[0]:
             rep.notes.append(f"{repo_name} {newest} is a new major version — not applied; upgrade deliberately")
@@ -228,6 +253,8 @@ def check_template(config: Path, rep: Report, template_repo: str = "pu-shd/chat"
     lock = json.loads(lock_path.read_text())
     rel = github_latest_release(template_repo)
     tag = rel["tag_name"]
+    if not re.fullmatch(r"v\d+\.\d+\.\d+", tag or ""):
+        raise UpdateError(f"{template_repo}: latest release tag {tag!r} is not vX.Y.Z")
     asset = next((a for a in rel.get("assets", []) if a["name"] == "template.lock"), None)
     if asset is None:
         raise UpdateError(f"{template_repo} {tag}: release has no template.lock asset")
@@ -244,6 +271,20 @@ def check_template(config: Path, rep: Report, template_repo: str = "pu-shd/chat"
     if lock.get("ref") == tag and lock.get("sha") == new["sha"]:
         rep.lines.append(f"- pu-shd/chat `{tag}` is current")
         return
+    # Never a downgrade (or the same tag re-pointed): "latest" is whatever a maintainer
+    # marked, so it must be strictly newer than what this repo already reviewed.
+    cur = lock.get("ref") or ""
+    if not re.fullmatch(r"v\d+\.\d+\.\d+", cur):
+        raise UpdateError(f"{lock_path}: ref {cur!r} is not vX.Y.Z")
+    if vkey(tag) <= vkey(cur):
+        raise UpdateError(f"{template_repo} {tag}: not newer than template.lock's {cur}; refusing a downgrade")
+    # Only a commit on the default branch (reviewed and merged), not one pushed to a tag
+    # from a side branch: main...<sha> is "behind" (or "identical") when sha is in main.
+    status, _, body = http(f"https://api.github.com/repos/{template_repo}/compare/main...{new['sha']}", github_headers())
+    on_main = json.loads(body).get("status") if status == 200 else None
+    if on_main not in ("behind", "identical"):
+        raise UpdateError(f"{template_repo} {tag}: commit {new['sha']} is not on main "
+                          f"(compare: {on_main or f'HTTP {status}'}); refusing it")
     # Images are built per department from the commit; a lock no longer carries one.
     merged = {k: v for k, v in lock.items() if k != "image"}
     merged.update({k: new[k] for k in ("repo", "ref", "sha")})

@@ -1,9 +1,13 @@
 name: Update check
 
-# Weekly: newer Zulip image (tag or upstream rebuild), sidecar images (same major only),
-# bicep CLI. Opens or refreshes one PR (branch auto/updates) with the pins rewritten and
-# the reserved-name list regenerated for a new Zulip version. Merge it, then tag a
-# release; each config repo's own update check then offers the new release.
+# Weekly: newer Zulip image (tag or upstream rebuild), sidecar images (tag + digest, same
+# major only), bicep CLI. Opens or refreshes one PR (branch auto/updates) with the pins
+# rewritten and the reserved-name list regenerated for a new Zulip version. Merge it, then
+# tag a release; each config repo's own update check then offers the new release.
+#
+# Privilege split: `check` finds the updates and runs the test suite (upstream code, in
+# containers) with a read-only token, and hands a patch to `pr`, which runs nothing from
+# the checkout, accepts only the files updates.py may rewrite, and opens the PR.
 #
 # PRs opened with the default GITHUB_TOKEN do not trigger CI. Add a fine-grained token
 # (contents + pull requests: write) as the secret UPDATE_PR_TOKEN so they do.
@@ -13,16 +17,18 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.updates.outputs.changed }}
+      title: ${{ steps.updates.outputs.title }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: {persist-credentials: false}
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with: {python-version: "3.12"}
       - name: Find updates
         id: updates
@@ -37,27 +43,74 @@ jobs:
       - name: Test the updated pins
         if: steps.updates.outputs.changed == 'true'
         run: docker compose -f tests/docker-compose.yml run --rm tests
-      - name: Open or update the PR
+      - name: Patch
         if: steps.updates.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --binary -- image/Dockerfile image/sidecars.json tests/Dockerfile tools/zulip_reserved.py > updates.patch
+          [ -s updates.patch ] || { echo "::error::updates reported changes but produced no diff"; exit 1; }
+      - if: steps.updates.outputs.changed == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with: {name: updates, path: "updates.patch\nsummary.md", if-no-files-found: error}
+
+  pr:
+    needs: check
+    if: needs.check.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {persist-credentials: false}
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: updates
+          path: ${{ runner.temp }}/updates
+      - name: Apply the patch (only the pinned files; no repository code runs here)
+        shell: bash
+        env:
+          PATCH: ${{ runner.temp }}/updates/updates.patch
+        run: |
+          set -euo pipefail
+          # Every path the patch touches must be one updates.py rewrites: no renames,
+          # no new or deleted files, no mode changes, nothing binary.
+          allowed='^(image/Dockerfile|image/sidecars\.json|tests/Dockerfile|tools/zulip_reserved\.py)$'
+          paths="$(git apply --numstat "$PATCH" | awk -F '\t' '{ if ($1 == "-" || $2 == "-") { print "BINARY:" $3 } else { print $3 } }')"
+          [ -n "$paths" ] || { echo "::error::empty patch"; exit 1; }
+          bad="$(grep -vE "$allowed" <<<"$paths" || true)"
+          [ -z "$bad" ] || { echo "::error::patch touches files outside the update allowlist: $bad"; exit 1; }
+          if grep -qE '^(new file mode|deleted file mode|old mode|new mode|similarity index|rename from|copy from|GIT binary patch|Binary files) ' "$PATCH"; then
+            echo "::error::patch creates, deletes, renames or re-modes a file"; exit 1
+          fi
+          git apply --index "$PATCH"
+          cp "${{ runner.temp }}/updates/summary.md" "${{ runner.temp }}/summary.md"
+      - name: Open or update the PR
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           token: ${{ secrets.UPDATE_PR_TOKEN || github.token }}
           branch: auto/updates
           delete-branch: true
-          commit-message: ${{ steps.updates.outputs.title }}
-          title: ${{ steps.updates.outputs.title }}
-          body-path: summary.md
+          commit-message: ${{ needs.check.outputs.title }}
+          title: ${{ needs.check.outputs.title }}
+          body-path: ${{ runner.temp }}/summary.md
           labels: dependencies
           add-paths: |
             image/Dockerfile
             image/sidecars.json
             tests/Dockerfile
             tools/zulip_reserved.py
+
+  ping:
+    needs: [check, pr]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
       - name: Healthchecks (optional)
-        if: always()
         env:
           PING: ${{ secrets.HEALTHCHECKS_PING_URL }}
-          OUTCOME: ${{ job.status }}
+          OUTCOME: ${{ (needs.check.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.pr.result)) && 'success' || 'fail' }}
         run: |
           [ -n "$PING" ] || { echo "no HEALTHCHECKS_PING_URL secret; not pinging"; exit 0; }
           [ "$OUTCOME" = success ] && suffix="" || suffix=/fail

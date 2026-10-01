@@ -14,10 +14,17 @@
 # which macOS resolves to 127.0.0.1 by itself. TLS comes from a local CA: accept the
 # browser warning, or run `local.zsh trust` once to add that CA to your login keychain.
 # Ports 443, 9080 (mock Entra) and 8025 (mail UI) on 127.0.0.1 must be free. Rerunning
-# `up` keeps data; `down` deletes it.
+# `up` keeps data; `down` deletes it (and removes the CA `trust` added, if any).
 source "${0:A:h}/common.zsh"
 
-STATE="${CHAT_LOCAL_STATE:-$CHAT_ROOT/.local-stack}"
+STATE="${CHAT_LOCAL_STATE-$CHAT_ROOT/.local-stack}"
+# `down` deletes $STATE recursively: never anything this script did not create.
+MARKER=".chat-local-stack"
+[[ -n "$STATE" ]] || die "CHAT_LOCAL_STATE is empty"
+STATE="${STATE:A}"
+[[ "$STATE" != / && "$STATE" != "${HOME:A}" && "$STATE" != "${CHAT_ROOT:A}" ]] \
+  || die "refusing CHAT_LOCAL_STATE=$STATE: it must be a directory of its own"
+KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 PROJECT=chat-local
 here="$CHAT_ROOT/tests/e2e"
 compose=(docker-compose -p "$PROJECT" -f "$here/docker-compose.yml" -f "$here/local.yml" -f "$STATE/override.json")
@@ -52,8 +59,19 @@ show_urls() {
 case "$ACTION" in
   down)
     require_cmd docker-compose
+    if [[ ! -e "$STATE" ]]; then log_ok "no local stack at $STATE"; exit 0; fi
+    [[ -d "$STATE" && -f "$STATE/$MARKER" ]] \
+      || die "refusing to delete $STATE: it has no $MARKER, so local.zsh did not create it (state from an older local.zsh: touch $STATE/$MARKER)"
     if [[ -f "$STATE/override.json" ]]; then
       "${compose[@]}" --profile jobs down -v --remove-orphans
+    fi
+    if [[ -s "$STATE/trusted-ca.sha1" ]]; then
+      sha="$(<"$STATE/trusted-ca.sha1")"
+      if command -v security >/dev/null 2>&1 && security delete-certificate -Z "$sha" "$KEYCHAIN" >/dev/null; then
+        log_ok "removed the local CA ($sha) from your login keychain"
+      else
+        log_warn "could not remove the local CA ($sha) from your login keychain: delete it in Keychain Access (security delete-certificate -Z $sha $KEYCHAIN)"
+      fi
     fi
     rm -rf "$STATE"
     log_ok "local stack removed"
@@ -67,14 +85,18 @@ case "$ACTION" in
     running || die "the local stack is not running (scripts/local.zsh up)"
     exec "${compose[@]}" logs -f --tail 100 zulip edge ;;
   trust)
-    require_cmd security
+    require_cmd security openssl
     running || die "start the stack first: the CA is created by its first TLS request"
     ca="$STATE/local-ca.crt"
     "${compose[@]}" cp edge:/data/caddy/pki/authorities/local/root.crt "$ca" \
       || die "no local CA yet; open one of the URLs once, then rerun trust"
+    sha="$(openssl x509 -noout -fingerprint -sha1 -in "$ca" | sed 's/.*=//; s/://g')"
+    [[ "$sha" == [0-9A-Fa-f](#c40) ]] || die "could not read the SHA-1 fingerprint of $ca"
     log_info "adding $ca to your login keychain as a trusted root (macOS asks for your password)"
-    security add-trusted-cert -r trustRoot -k "$HOME/Library/Keychains/login.keychain-db" "$ca"
-    log_ok "trusted; Safari and Chrome stop warning (Firefox keeps its own store). down deletes this CA, so remove it from Keychain Access afterwards"
+    security add-trusted-cert -r trustRoot -k "$KEYCHAIN" "$ca"
+    # Recorded so `down` removes exactly this certificate again.
+    print -r -- "$sha" > "$STATE/trusted-ca.sha1"
+    log_ok "trusted ($sha); Safari and Chrome stop warning (Firefox keeps its own store). down removes it again"
     exit 0 ;;
   up) ;;
   *) die "unknown action: $ACTION (up|status|logs|trust|down)" ;;
@@ -99,8 +121,12 @@ else
 fi
 
 log_step "Rendering $CONFIG for local use"
+if [[ -e "$STATE" && ! -f "$STATE/$MARKER" ]] && [[ -n "$(ls -A "$STATE" 2>/dev/null)" ]]; then
+  die "refusing to use $STATE: it already holds files local.zsh did not create (no $MARKER; state from an older local.zsh: touch $STATE/$MARKER)"
+fi
 mkdir -p "$STATE/secrets"
 chmod 700 "$STATE"
+: > "$STATE/$MARKER"
 for s in secret_key postgres_password redis_password rabbitmq_password memcached_password social_auth_oidc_secret email_password; do
   [[ -s "$STATE/secrets/zulip__$s" ]] || { umask 077; openssl rand -hex 24 | tr -d '\n' > "$STATE/secrets/zulip__$s"; }
 done

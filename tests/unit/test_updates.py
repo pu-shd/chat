@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 import shutil
 import ssl
 from pathlib import Path
@@ -15,6 +16,7 @@ from conftest import FIXTURES, ROOT
 
 D_OLD = "sha256:" + "1" * 64
 D_NEW = "sha256:" + "2" * 64
+D_HUB = "sha256:" + "3" * 64
 
 
 class FakeWeb:
@@ -61,6 +63,8 @@ def registry(web, *, zulip_tags, digest, sidecar_tags=None, bicep="v0.43.8"):
     web.add("ghcr.io/v2/zulip/zulip-server/manifests/", headers={"docker-content-digest": digest})
     for repo, tags in (sidecar_tags or {}).items():
         web.add(f"hub.docker.com/v2/repositories/{repo}/tags", {"results": [{"name": t} for t in tags], "next": None})
+    web.add("auth.docker.io/token", {"token": "anon"})
+    web.add("registry-1.docker.io/v2/", headers={"docker-content-digest": D_HUB})
     web.add("api.github.com/repos/Azure/bicep/releases/latest", {"tag_name": bicep})
 
 
@@ -113,10 +117,42 @@ def test_sidecars_stay_within_their_major(web, tree, capsys):
     registry(web, zulip_tags=["12.3-0"], digest=D_OLD, sidecar_tags=tags)
     code, out = run_zulip(tree, capsys)
     sidecars = (tree / "image/sidecars.json").read_text()
-    assert "docker.io/library/redis:7.10-alpine" in sidecars
-    assert "docker.io/library/postgres:17-alpine" in sidecars
+    # Tag and digest move together; untouched pins keep their own digest.
+    assert f'"docker.io/library/redis:7.10-alpine@{D_HUB}"' in sidecars
+    assert json.loads(sidecars)["postgres"] == json.loads((ROOT / "image/sidecars.json").read_text())["postgres"]
+    assert "HEAD https://registry-1.docker.io/v2/library/redis/manifests/7.10-alpine" in web.calls
+    assert not any("manifests/17-alpine" in c for c in web.calls)
     assert "redis 8.2-alpine is a new major version — not applied" in out.out
     assert "postgres 18-alpine is a new major version" in out.out
+
+
+def test_shipped_sidecars_are_all_pinned_by_tag_and_digest():
+    data = json.loads((ROOT / "image/sidecars.json").read_text())
+    images = {k: v for k, v in data.items() if not k.startswith("_")}
+    assert set(images) == {"redis", "memcached", "rabbitmq", "postgres", "curl"}
+    text = (ROOT / "image/sidecars.json").read_text()
+    assert sorted(m.group("key") for m in updates.SIDECAR_RE.finditer(text)) == sorted(images)
+    for k, v in images.items():
+        assert re.fullmatch(r"docker\.io/[a-z0-9]+/[a-z0-9-]+:[\w.-]+@sha256:[0-9a-f]{64}", v), (k, v)
+
+
+def test_unpinned_sidecar_is_an_error_not_skipped(web, tree, capsys):
+    side = tree / "image/sidecars.json"
+    data = json.loads(side.read_text())
+    data["redis"] = data["redis"].split("@")[0]
+    side.write_text(json.dumps(data, indent=2) + "\n")
+    registry(web, zulip_tags=["12.3-0"], digest=D_OLD, sidecar_tags=CURRENT_SIDECARS)
+    code, out = run_zulip(tree, capsys)
+    assert code == 1 and "redis not pinned" in out.err
+
+
+def test_sidecar_digest_lookup_failure_is_an_error(web, tree, capsys):
+    web.add("registry-1.docker.io/v2/", status=401)
+    registry(web, zulip_tags=["12.3-0"], digest=D_OLD,
+             sidecar_tags={**CURRENT_SIDECARS, "library/redis": ["7.4-alpine", "7.5-alpine"]})
+    code, out = run_zulip(tree, capsys)
+    assert code == 1 and "no digest (HTTP 401)" in out.err
+    assert "7.5-alpine" not in (tree / "image/sidecars.json").read_text()
 
 
 def test_bicep_cli_bump(web, tree, capsys):
@@ -158,7 +194,8 @@ def config_repo(tmp_path):
 SHA_NEW = "c" * 40
 
 
-def release(web, tag, image, asset=True, sha=SHA_NEW, tag_sha=None):
+def release(web, tag, image, asset=True, sha=SHA_NEW, tag_sha=None, on_main="behind", compare_status=200):
+    web.add(f"api.github.com/repos/pu-shd/chat/compare/main...{sha}", {"status": on_main}, status=compare_status)
     rel = {"tag_name": tag, "html_url": f"https://github.com/pu-shd/chat/releases/tag/{tag}",
            "assets": [{"name": "template.lock", "browser_download_url": f"https://dl.example/{tag}/template.lock"}] if asset else []}
     web.add("api.github.com/repos/pu-shd/chat/releases/latest", rel)
@@ -174,6 +211,44 @@ def test_template_bump_rewrites_lock_and_uses(web, config_repo, capsys):
     wf = (config_repo / ".github/workflows/deploy.yml").read_text()
     assert wf.count(f"@{SHA_NEW} # v0.2.0") == 2 and "other/repo@v0.1.0" in wf
     assert "pu-shd/chat v0.1.0 → v0.2.0" in capsys.readouterr().out
+
+
+def test_template_bump_accepts_the_tip_of_main(web, config_repo, capsys):
+    release(web, "v0.2.0", "x", on_main="identical")
+    assert updates.main(["template", "--config-repo", str(config_repo), "--apply"]) == 0
+    assert json.loads((config_repo / "template.lock").read_text())["sha"] == SHA_NEW
+
+
+@pytest.mark.parametrize("on_main,status", [("diverged", 200), ("ahead", 200), (None, 404)])
+def test_template_bump_refuses_a_commit_not_on_main(web, config_repo, capsys, on_main, status):
+    release(web, "v0.2.0", "x", on_main=on_main, compare_status=status)
+    before = {p: p.read_text() for p in config_repo.rglob("*") if p.is_file()}
+    assert updates.main(["template", "--config-repo", str(config_repo), "--apply"]) == 1
+    assert "is not on main" in capsys.readouterr().err
+    assert {p: p.read_text() for p in config_repo.rglob("*") if p.is_file()} == before
+    assert f"GET https://api.github.com/repos/pu-shd/chat/compare/main...{SHA_NEW}" in web.calls
+
+
+@pytest.mark.parametrize("tag", ["v0.0.9", "v0.1.0"])
+def test_template_bump_refuses_a_downgrade_or_same_version(web, config_repo, capsys, tag):
+    release(web, tag, "x")
+    assert updates.main(["template", "--config-repo", str(config_repo), "--apply"]) == 1
+    assert "refusing a downgrade" in capsys.readouterr().err
+    assert json.loads((config_repo / "template.lock").read_text())["ref"] == "v0.1.0"
+
+
+def test_template_bump_compares_versions_numerically(web, config_repo, capsys):
+    lock = json.loads((config_repo / "template.lock").read_text())
+    (config_repo / "template.lock").write_text(json.dumps({**lock, "ref": "v0.9.0"}))
+    release(web, "v0.10.0", "x")
+    assert updates.main(["template", "--config-repo", str(config_repo), "--apply"]) == 0
+    assert json.loads((config_repo / "template.lock").read_text())["ref"] == "v0.10.0"
+
+
+def test_template_bump_refuses_a_non_semver_tag(web, config_repo, capsys):
+    release(web, "nightly", "x")
+    assert updates.main(["template", "--config-repo", str(config_repo), "--apply"]) == 1
+    assert "is not vX.Y.Z" in capsys.readouterr().err
 
 
 def test_template_bump_refuses_a_moved_tag(web, config_repo, capsys):

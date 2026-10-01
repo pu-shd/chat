@@ -59,24 +59,36 @@ for srv in "${SERVERS[@]}"; do
   elif days="$("${PROBE[@]}" days-until "$expires" 2>/dev/null)"; then
     if (( days < 21 )); then problems+=("Entra client secret expires in $days days: entra-app.zsh --server $srv --rotate-secret, then update-server.zsh --restart")
     elif (( days < 60 )); then warnings_+=("Entra client secret expires in $days days"); fi
+  else
+    problems+=("could not read the expiry '$expires' of $srv-oidc-secret")
   fi
 
   if [[ "$(jqp .email.provider)" == acs ]]; then
     # ACS SMTP authenticates with an Entra client secret: it expires like the OIDC one.
     mexp="$(az keyvault secret show --vault-name "$KV_NAME" --name email-password --query attributes.expires -o tsv 2>/dev/null || true)"
-    if [[ -n "$mexp" ]] && days="$("${PROBE[@]}" days-until "$mexp" 2>/dev/null)"; then
+    if [[ -z "$mexp" ]]; then
+      warnings_+=("email-password has no expiry recorded; rerun acs-email.zsh --rotate-secret to record it")
+    elif days="$("${PROBE[@]}" days-until "$mexp" 2>/dev/null)"; then
       if (( days < 21 )); then problems+=("ACS SMTP secret expires in $days days: acs-email.zsh --rotate-secret, then restart the servers")
       elif (( days < 60 )); then warnings_+=("ACS SMTP secret expires in $days days"); fi
-    elif [[ -z "$mexp" ]]; then
-      warnings_+=("email-password has no expiry recorded; rerun acs-email.zsh --rotate-secret to record it")
+    else
+      problems+=("could not read the expiry '$mexp' of email-password")
     fi
   fi
 
   if [[ "$(jqs .ip_gate)" == true ]]; then
     snap="$CONFIG_DIR/$(jqp .ip_gate.snapshot)"
     if [[ -f "$snap" ]]; then
-      age="$("$CHAT_PY" -c 'import sys, json, datetime as d; print((d.date.today() - d.date.fromisoformat(json.load(open(sys.argv[1]))["snapshot_date"][:10])).days)' "$snap")"
-      if (( age > $(jqp .ip_gate.snapshot_max_age_days) )); then warnings_+=("pugwips snapshot is $age days old"); fi
+      # Same fields as ip-gate.zsh: snapshot_date, else resolved_at. An unreadable date is
+      # a problem for this server, never a crash of the whole run.
+      if age="$("$CHAT_PY" -c 'import sys, json, datetime as d
+s = json.load(open(sys.argv[1]))
+v = (s.get("snapshot_date") or s.get("resolved_at")) if isinstance(s, dict) else None
+print((d.date.today() - d.date.fromisoformat(str(v)[:10])).days) if v else sys.exit(2)' "$snap" 2>/dev/null)"; then
+        if (( age > $(jqp .ip_gate.snapshot_max_age_days) )); then warnings_+=("pugwips snapshot is $age days old"); fi
+      else
+        problems+=("pugwips snapshot $snap has no readable snapshot_date or resolved_at")
+      fi
     fi
   fi
 

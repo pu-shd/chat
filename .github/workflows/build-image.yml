@@ -1,7 +1,7 @@
 name: Build the image into a department registry (reusable)
 
 # Called by a config repo before deploying:
-#   uses: pu-shd/chat/.github/workflows/build-image.yml@<sha>
+#   uses: pu-shd/chat/.github/workflows/build-image.yml@<release commit sha> # vX.Y.Z
 # Builds chat:<ref>-<sha7> in the department's Azure Container Registry from the pinned
 # template commit (reused if it already exists) and imports the sidecar images.
 on:
@@ -26,8 +26,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
+    # Keyed on the department ('.' cannot occur in a server name, so this never shares a
+    # server's queue).
     concurrency:
-      group: chat-${{ inputs.environment }}-image
+      group: chat-${{ inputs.config_dir }}.image
       cancel-in-progress: false
     timeout-minutes: 45
     outputs:
@@ -36,15 +38,15 @@ jobs:
       CHAT_PY: ${{ github.workspace }}/.chat-template/.venv/bin/python
       CFG: ${{ inputs.config_dir }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: {persist-credentials: false}
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: pu-shd/chat
           ref: ${{ inputs.template_ref }}
           path: .chat-template
           persist-credentials: false
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with: {python-version: "3.12"}
       - name: Tools
         shell: bash
@@ -52,7 +54,7 @@ jobs:
           [[ "$CFG" =~ ^[a-z][a-z0-9]{1,11}$ ]] || { echo "bad config_dir"; exit 2; }
           sudo apt-get update -qq && sudo apt-get install -y -qq zsh jq
           zsh .chat-template/scripts/setup-venv.zsh
-      - uses: azure/login@v3
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ inputs.azure_client_id }}
           tenant-id: ${{ inputs.azure_tenant_id }}

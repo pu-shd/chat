@@ -16,11 +16,13 @@
 #   chat-manage register-push            # push bouncer registration (Community plan)
 #   chat-manage send-test-email <to>     # prove outgoing mail (Resend) works
 #
-# Every command prints exactly one line starting with CHAT-RESULT: {json}, which
-# the calling scripts parse from the job's logs. No such line means failure.
+# Every command prints a line starting with CHAT-RESULT: {json}, which the calling
+# scripts parse from the job's logs (the last one wins). No such line means failure;
+# a failing manage.py call always ends in an ok:false line and a non-zero exit.
 set -euo pipefail
 
-MANAGE=/home/zulip/deployments/current/manage.py
+MANAGE="${CHAT_MANAGE_PY:-/home/zulip/deployments/current/manage.py}"
+ZULIP_ENTRYPOINT="${CHAT_ZULIP_ENTRYPOINT:-/sbin/entrypoint.sh}"  # overridable for tests
 
 result() { printf 'CHAT-RESULT: %s\n' "$1"; }
 # result_kv key value [key value...] — a JSON object with ok:true, safely quoted.
@@ -29,16 +31,41 @@ result_kv() {
 }
 
 init() {
-    /sbin/entrypoint.sh app:init >/tmp/chat-init.log 2>&1 || {
+    "$ZULIP_ENTRYPOINT" app:init >/tmp/chat-init.log 2>&1 || {
         cat /tmp/chat-init.log >&2
         result '{"ok": false, "error": "app:init failed"}'
         exit 1
     }
 }
 
+# fail_result what — print an ok:false CHAT-RESULT for a failed step, safely quoted.
+fail_result() {
+    python3 -c 'import json, sys; print("CHAT-RESULT: " + json.dumps({"ok": False, "error": sys.argv[1]}))' "$1"
+}
+
+# manage what <manage.py args...> — run a management command as the zulip user;
+# on failure print ok:false and exit 1 (never fall through to an ok:true line).
+manage() {
+    local what="$1"; shift
+    local args="" a
+    for a in "$@"; do args+=" $(printf '%q' "$a")"; done
+    su zulip -c "$MANAGE$args" || { fail_result "$what failed"; exit 1; }
+}
+
 shell_py() {
     # Run Python inside Zulip's Django context as the zulip user.
-    su zulip -c "$MANAGE shell --no-startup -c $(printf '%q' "$1")"
+    # A failure always ends in ok:false: the script's own ok:false line when it printed
+    # one (it says why), otherwise a generic one (a crash, or ok:true then an error).
+    local out rc=0
+    out="$(mktemp)"
+    su zulip -c "$MANAGE shell --no-startup -c $(printf '%q' "$1")" >"$out" || rc=$?
+    cat "$out"
+    if [[ $rc -ne 0 ]]; then
+        grep '^CHAT-RESULT: ' "$out" | tail -n 1 | grep -q '"ok": false' || fail_result "${cmd:-command} failed"
+        rm -f "$out"
+        exit 1
+    fi
+    rm -f "$out"
 }
 
 cmd="${1:-}"
@@ -75,7 +102,8 @@ else:
     deactivate-realm)
         [[ $# -eq 1 && -n "$1" ]] || { result '{"ok": false, "error": "usage: deactivate-realm <slug>"}'; exit 2; }
         init
-        su zulip -c "$MANAGE deactivate_realm -r $(printf '%q' "$1")"
+        # 12.x requires a reason (zerver/actions/realm_settings.py lists the choices).
+        manage deactivate_realm deactivate_realm -r "$1" --deactivation_reason owner_request
         result_kv slug "$1" deactivated yes
         ;;
     list-realms)
@@ -113,6 +141,14 @@ except UserProfile.DoesNotExist:
     # No password: the person signs in with Entra (OIDC) using this email.
     user = do_create_user(email, None, realm, full, role=ROLES[role], acting_user=None)
     created = True
+if not user.is_active:
+    print("CHAT-RESULT: " + json.dumps({"ok": False, "email": email, "error": f"account {email} is deactivated; reactivate it first (manage.py reactivate_user)"}))
+    raise SystemExit(1)
+if user.role == UserProfile.ROLE_REALM_OWNER and ROLES[role] != UserProfile.ROLE_REALM_OWNER:
+    owners = UserProfile.objects.filter(realm=realm, is_active=True, is_bot=False, role=UserProfile.ROLE_REALM_OWNER).count()
+    if owners <= 1:
+        print("CHAT-RESULT: " + json.dumps({"ok": False, "email": email, "error": f"{email} is the last active owner of this realm; make someone else owner first"}))
+        raise SystemExit(1)
 if user.role != ROLES[role]:
     do_change_user_role(user, ROLES[role], acting_user=None, notify=True)
 print("CHAT-RESULT: " + json.dumps({"ok": True, "email": email, "role": role, "created": created, "realm": realm.url}))
@@ -120,13 +156,13 @@ print("CHAT-RESULT: " + json.dumps({"ok": True, "email": email, "role": role, "c
         ;;
     register-push)
         init
-        su zulip -c "$MANAGE register_server --agree_to_terms_of_service"
+        manage register_server register_server --agree_to_terms_of_service
         result_kv registered yes
         ;;
     send-test-email)
         [[ $# -eq 1 && "$1" == *@* ]] || { result '{"ok": false, "error": "usage: send-test-email <address>"}'; exit 2; }
         init
-        su zulip -c "$MANAGE send_test_email $(printf '%q' "$1")"
+        manage send_test_email send_test_email "$1"
         result_kv sent_to "$1"
         ;;
     *)

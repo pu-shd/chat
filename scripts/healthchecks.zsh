@@ -95,7 +95,12 @@ case "$ACTION" in
   delete)
     typeset -a slugs
     if [[ -n "$SERVER" ]]; then
-      slugs=("${(@f)$(jq -r --arg p "$(jqp .prefix)-$SERVER-" '.healthchecks.checks[].slug | select(startswith($p))' "$PLATFORM_JSON")}")
+      # Exactly this server's slugs: a prefix match on <prefix>-<server>- would also
+      # take the checks of a server named <server>-<more>.
+      load_server "$SERVER"
+      slugs=("${(@f)$(jq -r '.healthchecks | .health, .web, .ip_gate | strings' "$SERVER_JSON")}")
+      slugs=("${(@)slugs:#}")
+      (( ${#slugs} )) || die "generated/servers/$SERVER.json names no Healthchecks checks; render first"
       confirm_typed "DELETE-CHECKS $SERVER"
     else
       slugs=("${(@f)$(jq -r '.healthchecks.checks[].slug' "$PLATFORM_JSON")}")

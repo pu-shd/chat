@@ -18,7 +18,7 @@ az_login
 log_step "Platform for $(jqp .department) in $RG ($LOCATION)"
 
 log_step "1/5 Resource group"
-if az group show -n "$RG" >/dev/null 2>&1; then
+if az_exists group show -n "$RG" --query id -o tsv; then
   log_ok "$RG exists"
 else
   if $DRY_RUN; then log_info "dry run: would create $RG, $KV_NAME and the platform"; exit 0; fi
@@ -28,7 +28,7 @@ else
 fi
 
 log_step "2/5 Key Vault (RBAC)"
-if az keyvault show -n "$KV_NAME" -g "$RG" >/dev/null 2>&1; then
+if az_exists keyvault show -n "$KV_NAME" -g "$RG" --query id -o tsv; then
   log_ok "$KV_NAME exists"
 else
   if az keyvault list-deleted --query "[?name=='$KV_NAME'].name" -o tsv 2>/dev/null | grep -qx "$KV_NAME"; then
@@ -75,9 +75,13 @@ trap 'rm -f "$PARAMS"' EXIT
 ACS_NAME="$(jq -r '.acs.communication_service // empty' "$PLATFORM_JSON")"
 LINKED='[]'
 if [[ -n "$ACS_NAME" ]]; then
-  # Keep domains acs-email.zsh already linked; a redeploy must not unlink them.
-  LINKED="$(az communication show -g "$RG" -n "$ACS_NAME" --query 'linkedDomains' -o json 2>/dev/null || true)"
-  [[ -n "$LINKED" && "$LINKED" != null ]] || LINKED='[]'
+  # Keep domains acs-email.zsh already linked; a redeploy must not unlink them. Only a
+  # resource that does not exist yet has none: any other failure to read them stops here.
+  if az_exists communication show -g "$RG" -n "$ACS_NAME" --query id -o tsv; then
+    LINKED="$(az_retry communication show -g "$RG" -n "$ACS_NAME" --query 'linkedDomains' -o json)" \
+      || die "could not read $ACS_NAME's linked email domains; not redeploying (it would unlink them)"
+    LINKED="$(print -r -- "${LINKED:-null}" | jq -c '. // []')"
+  fi
 fi
 kv_secret_get pg-admin-password | jq -Rs --slurpfile p "$PLATFORM_JSON" --argjson linked "$LINKED" '{
   "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",

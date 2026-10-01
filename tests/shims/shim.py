@@ -37,6 +37,8 @@ if at_files:
 if not sys.stdin.isatty() and ((cmd == "gh" and "secret" in args) or (cmd == "curl" and "-K" in args)):
     entry["stdin"] = sys.stdin.read()
     joined += " " + entry["stdin"].strip()  # curl -K - carries the URL on stdin
+elif not sys.stdin.isatty() and cmd == "gh" and "--input" in args:
+    entry["stdin"] = sys.stdin.read()  # a request body (gh api --input -): recorded, not matched
 with open(os.environ["SHIM_LOG"], "a") as log:
     log.write(json.dumps(entry) + "\n")
 

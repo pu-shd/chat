@@ -109,7 +109,8 @@ else
 fi
 
 log_step "Entra app $APP_DISPLAY (SMTP authentication)"
-APP_ID="$(az ad app list --display-name "$APP_DISPLAY" --query '[0].appId' -o tsv)"
+# Only an app we own: a look-alike would be granted the role and the SMTP login.
+APP_ID="$(entra_app_by_name "$APP_DISPLAY")" || die "not using app registration $APP_DISPLAY"
 if [[ -z "$APP_ID" ]]; then
   confirm "Create Entra app registration $APP_DISPLAY for ACS SMTP?" || die "aborted"
   APP_ID="$(az ad app create --display-name "$APP_DISPLAY" --sign-in-audience AzureADMyOrg --query appId -o tsv)"

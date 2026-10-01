@@ -6,8 +6,9 @@
 # * chat:<ref>-<sha7>  built by ACR Tasks (az acr build) from image/ of THIS template
 #   checkout, which must be exactly template.lock's commit (clean). Built once: a tag
 #   that exists is reused, and is locked against overwrite and deletion.
-# * the sidecar images in image/sidecars.json, imported from Docker Hub once, so no
-#   server depends on Docker Hub (or its rate limits) at run time.
+# * the sidecar images in image/sidecars.json, imported from Docker Hub once by their
+#   pinned digest (tagged <repo>:<tag> here, and locked), so no server depends on Docker
+#   Hub (or its rate limits, or a moved upstream tag) at run time.
 # Prints the image reference (<registry>/chat@sha256:...) on stdout, and writes
 # image=... to $GITHUB_OUTPUT in Actions.
 source "${0:A:h}/common.zsh"
@@ -61,13 +62,26 @@ fi
 lock_tag "$TAG"
 
 log_step "Sidecar images"
+# Each is pinned as docker.io/<repo>:<tag>@sha256:<multi-arch digest>. The import is by
+# that digest (az acr import --source <repo>@sha256:...), tagged <repo>:<tag> in the
+# registry, so a moved upstream tag can never change what a server runs.
 for src in "${(@f)$(jq -r 'to_entries[] | select(.key | startswith("_") | not) | .value' "$CHAT_ROOT/image/sidecars.json")}"; do
-  target="${src#docker.io/}"
-  if [[ -n "$(digest_of "$target")" ]]; then
-    log_ok "$target present"
+  [[ "$src" =~ '^docker\.io/[a-z0-9._/-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$' ]] \
+    || die "image/sidecars.json: '$src' is not pinned as docker.io/<repo>:<tag>@sha256:<digest>"
+  pinned="${src##*@}"          # sha256:...
+  ref="${src%@*}"              # docker.io/<repo>:<tag>
+  target="${ref#docker.io/}"   # <repo>:<tag> in the department registry
+  repo="${target%:*}"
+  have="$(digest_of "$target")"
+  if [[ "$have" == "$pinned" ]]; then
+    log_ok "$target present ($pinned)"
+  elif [[ -z "$have" ]]; then
+    az_retry acr import -n "$ACR" -g "$RG" --source "docker.io/$repo@$pinned" --image "$target" --output none
+    have="$(digest_of "$target")"
+    [[ "$have" == "$pinned" ]] || die "imported $target but the registry reports ${have:-no digest}, not the pinned $pinned"
+    log_ok "imported $target ($pinned)"
   else
-    az_retry acr import -n "$ACR" -g "$RG" --source "$src" --image "$target" --output none
-    log_ok "imported $target"
+    die "$target in $ACR is $have, but image/sidecars.json pins $pinned; registry tags are locked, so pin a new tag"
   fi
   lock_tag "$target"
 done

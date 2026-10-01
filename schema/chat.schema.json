@@ -126,9 +126,9 @@
       }
     },
     "text": {
-      "description": "Display text: no control characters, and it may not start with '-' or a bracket (it reaches command lines and Python settings).",
+      "description": "Display text: no control characters or backslashes, and it may not start with '-' or a bracket (it reaches command lines and Python settings).",
       "type": "string",
-      "pattern": "^[^\\x00-\\x1f\\x7f\\-\\[({][^\\x00-\\x1f\\x7f]{0,99}$"
+      "pattern": "^[^\\x00-\\x1f\\x7f\\\\\\-\\[({][^\\x00-\\x1f\\x7f\\\\]{0,99}$"
     },
     "theme": {
       "type": "string",
@@ -163,7 +163,8 @@
         },
         "prefix": {
           "type": "string",
-          "pattern": "^[a-z][a-z0-9-]{1,14}[a-z0-9]$"
+          "description": "Prefix of every Azure name. No consecutive hyphens (Container Apps reject '--').",
+          "pattern": "^(?!.*--)[a-z][a-z0-9-]{1,14}[a-z0-9]$"
         },
         "vnet_cidr": {
           "$ref": "#/$defs/cidr4"
@@ -238,7 +239,8 @@
           "$ref": "#/$defs/email"
         },
         "from_name": {
-          "$ref": "#/$defs/text"
+          "$ref": "#/$defs/text",
+          "description": "Deprecated: has no effect on Zulip's mail (Zulip sets DEFAULT_FROM_EMAIL to ZULIP_ADMINISTRATOR and sends From that or NOREPLY_EMAIL_ADDRESS); render warns when it is set. Only used as the display name of ACS sender usernames. Still accepted so existing configs validate."
         },
         "host": {
           "$ref": "#/$defs/hostname"
@@ -371,7 +373,8 @@
       "minProperties": 1,
       "propertyNames": {
         "type": "string",
-        "pattern": "^[a-z][a-z0-9-]{0,14}[a-z0-9]$"
+        "description": "Server name, part of every derived Azure name. No consecutive hyphens.",
+        "pattern": "^(?!.*--)[a-z][a-z0-9-]{0,14}[a-z0-9]$"
       },
       "additionalProperties": {
         "oneOf": [

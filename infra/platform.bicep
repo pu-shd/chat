@@ -168,6 +168,9 @@ resource environment 'Microsoft.App/managedEnvironments@2025-01-01' = {
       infrastructureSubnetId: vnet.properties.subnets[0].id
       internal: false
     }
+    // Encrypt app-to-app traffic inside the environment: the sidecars (Redis, RabbitMQ,
+    // memcached) speak plaintext on their internal ports to the -mgmt job.
+    peerTrafficConfiguration: { encryption: { enabled: true } }
     appLogsConfiguration: {
       destination: 'log-analytics'
       logAnalyticsConfiguration: {

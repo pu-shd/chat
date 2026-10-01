@@ -1,8 +1,8 @@
 {
-  "_note": "Upstream images each department's build-image.zsh imports into its own Azure Container Registry (as <registry>/<path>), so nothing is pulled from Docker Hub at run time. Bumped by tools/updates.py (same major only).",
-  "redis": "docker.io/library/redis:7.4-alpine",
-  "memcached": "docker.io/library/memcached:1.6-alpine",
-  "rabbitmq": "docker.io/library/rabbitmq:4.2-alpine",
-  "postgres": "docker.io/library/postgres:17-alpine",
-  "curl": "docker.io/curlimages/curl:8.16.0"
+  "_note": "Upstream images each department's build-image.zsh imports into its own Azure Container Registry (as <registry>/<path>:<tag>, from the pinned multi-arch digest), so nothing is pulled from Docker Hub at run time. Pinned as <image>:<tag>@sha256:<index digest>; tools/updates.py bumps tag and digest together (same major only).",
+  "redis": "docker.io/library/redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499",
+  "memcached": "docker.io/library/memcached:1.6-alpine@sha256:9e4de012dc607573052061c0bcb38abc775e1dd59b24e7ac38d1892842094aaf",
+  "rabbitmq": "docker.io/library/rabbitmq:4.2-alpine@sha256:920aeef84def9973d06c8334f71914d8a71dba1e8b38a7b0ff126a3da8e3d3ef",
+  "postgres": "docker.io/library/postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24",
+  "curl": "docker.io/curlimages/curl:8.16.0@sha256:463eaf6072688fe96ac64fa623fe73e1dbe25d8ad6c34404a669ad3ce1f104b6"
 }

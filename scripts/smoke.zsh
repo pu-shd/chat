@@ -29,7 +29,7 @@ GATE="${0:A:h}/ip-gate.zsh"
 if [[ "$(jqs .ip_gate)" == true && -n "$RUNNER_IP" ]]; then
   [[ "$RUNNER_IP" == auto ]] && RUNNER_IP="$(curl -fsS --max-time 10 https://api.ipify.org)"
   "$GATE" --config "$CONFIG_DIR" --server "$SERVER" --add-temp "$RUNNER_IP"
-  trap '"$GATE" --config "$CONFIG_DIR" --server "$SERVER" --remove-temp || log_error "could not remove the temporary IP rule; remove ci-runner-temp by hand"' EXIT
+  trap '"$GATE" --config "$CONFIG_DIR" --server "$SERVER" --remove-temp || log_error "could not remove this run'\''s temporary IP rule (ci-temp-*); ip-gate.zsh --apply removes stale ones after TEMP_RULE_MAX_AGE, or remove it by hand"' EXIT
   sleep 20
 fi
 

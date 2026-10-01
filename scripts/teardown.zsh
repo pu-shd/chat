@@ -14,12 +14,24 @@
 #   --platform      delete the whole resource group (needs --purge and every server)
 #   --github        delete the CI app registration and the GitHub Environment/variables
 #
-# One confirmation covers the run: type "TEARDOWN <dept>" — or "TEARDOWN <dept> PURGE"
-# with --purge. CHAT_CONFIRM supplies it non-interactively (the Teardown workflow).
+# --server may be repeated (--also-server <name> is the same); every one is torn down.
+#
+# One confirmation covers the run, and it names what it covers: type
+# "TEARDOWN <dept> ALL" (no --server), or "TEARDOWN <dept> <server> [<server> ...]" (the
+# selected servers, sorted) — each with " PURGE" appended for --purge. So the phrase for
+# one server can never confirm a teardown of all of them. CHAT_CONFIRM supplies it
+# non-interactively (the Teardown workflow).
 source "${0:A:h}/common.zsh"
 PURGE=false PLATFORM=false ENTRA=false GITHUB=false HC=false
-typeset -a ONLY
-parse_common_args "$@"
+typeset -a ONLY ARGS
+# parse_common_args keeps only the last --server; collect every one first.
+while (( $# )); do
+  case "$1" in
+    --server) ONLY+=("${2:?--server needs a name}"); shift 2 ;;
+    *) ARGS+=("$1"); shift ;;
+  esac
+done
+parse_common_args "${ARGS[@]}"
 set -- "${CHAT_ARGS_REST[@]}"
 while (( $# )); do
   case "$1" in
@@ -32,7 +44,6 @@ while (( $# )); do
     *) die "unknown argument: $1" ;;
   esac
 done
-[[ -n "$SERVER" ]] && ONLY+=("$SERVER")
 load_platform
 DEPT="$(jqp .department)"
 S="${0:A:h}"
@@ -61,7 +72,8 @@ hc_manageable() {
   return 1
 }
 
-phrase="TEARDOWN $DEPT"; $PURGE && phrase+=" PURGE"
+if (( ${#ONLY} )); then phrase="TEARDOWN $DEPT ${(j: :)${(@o)SERVERS}}"; else phrase="TEARDOWN $DEPT ALL"; fi
+$PURGE && phrase+=" PURGE"
 log_warn "about to remove: servers ${SERVERS[*]} ($($PURGE && print "PURGE: databases, uploads and secrets destroyed" || print "data kept"))"
 $HC && log_warn "  + their Healthchecks checks"
 $ENTRA && log_warn "  + their Entra sign-in app registrations"
@@ -81,7 +93,8 @@ for srv in "${SERVERS[@]}"; do
     CHAT_CONFIRM="DELETE-CHECKS $srv" "$S/healthchecks.zsh" --config "$CONFIG_DIR" --server "$srv" --delete
   fi
   if $ENTRA; then
-    app="$(az ad app list --display-name "$PREFIX-$srv-zulip" --query '[0].appId' -o tsv 2>/dev/null || true)"
+    # Only an app we own: never delete another team's look-alike.
+    app="$(entra_app_by_name "$PREFIX-$srv-zulip")" || die "not deleting app registration $PREFIX-$srv-zulip"
     if [[ -n "$app" ]]; then
       az ad app delete --id "$app"
       log_ok "deleted Entra app $PREFIX-$srv-zulip ($app)"
@@ -100,7 +113,7 @@ fi
 
 if $GITHUB; then
   log_step "GitHub"
-  app="$(az ad app list --display-name "$(jqp .names.github_app)" --query '[0].appId' -o tsv 2>/dev/null || true)"
+  app="$(entra_app_by_name "$(jqp .names.github_app)")" || die "not deleting app registration $(jqp .names.github_app)"
   if [[ -n "$app" ]]; then az ad app delete --id "$app"; log_ok "deleted CI app registration ($app)"; fi
   if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
     repo="$(jqp .github.repo)"

@@ -1,7 +1,7 @@
 name: Deploy one Zulip server (reusable)
 
 # Called by a department's config repo, e.g.
-#   uses: pu-shd/chat/.github/workflows/deploy-server.yml@v1.2.3
+#   uses: pu-shd/chat/.github/workflows/deploy-server.yml@<release commit sha> # vX.Y.Z
 # The caller's checkout holds chat.yml + generated/; this repo is checked out at the
 # same ref into .chat-template. Azure login is OIDC against the CALLER's GitHub
 # Environment (subject repo:<caller>:environment:<environment>).
@@ -27,8 +27,11 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
+    # One queue per department server, keyed on the department (config_dir), not the
+    # GitHub Environment: ops.yml's actions on this server (teardown included, which runs
+    # in <dept>-admin) share it. Department-wide ops use chat-<dept> (see ops.yml).
     concurrency:
-      group: chat-${{ inputs.environment }}-${{ inputs.server }}
+      group: chat-${{ inputs.config_dir }}-${{ inputs.server }}
       cancel-in-progress: false
     timeout-minutes: 60
     env:
@@ -38,20 +41,22 @@ jobs:
       CFG: ${{ inputs.config_dir }}
       SRV: ${{ inputs.server }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {persist-credentials: false}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: pu-shd/chat
           ref: ${{ inputs.template_ref }}
           path: .chat-template
-      - uses: actions/setup-python@v7
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with: {python-version: "3.12"}
       - name: Tools
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq zsh jq dnsutils
           zsh .chat-template/scripts/setup-venv.zsh
       - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
-      - uses: azure/login@v3
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ inputs.azure_client_id }}
           tenant-id: ${{ inputs.azure_tenant_id }}

@@ -13,12 +13,14 @@ for a in "${CHAT_ARGS_REST[@]}"; do
 done
 load_platform
 az_login
-az group show -n "$RG" >/dev/null 2>&1 || { log_info "$RG does not exist"; exit 0; }
+az_exists group show -n "$RG" --query id -o tsv || { log_info "$RG does not exist"; exit 0; }
 
-left="$(az containerapp list -g "$RG" --query '[].name' -o tsv) $(az containerapp job list -g "$RG" --query '[].name' -o tsv)"
-left="${left// /}"
-if [[ -n "${left//$'\n'/}" ]]; then
-  die "servers remain in $RG; run teardown-server.zsh --purge for each first: $(az containerapp list -g "$RG" --query '[].name' -o tsv | tr '\n' ' ')"
+# Two checked reads: a failed list must never read as "nothing left".
+apps="$(az_retry containerapp list -g "$RG" --query '[].name' -o tsv)" || die "could not list the Container Apps in $RG"
+jobs="$(az_retry containerapp job list -g "$RG" --query '[].name' -o tsv)" || die "could not list the Container Apps jobs in $RG"
+left="${apps//[[:space:]]/}${jobs//[[:space:]]/}"
+if [[ -n "$left" ]]; then
+  die "servers remain in $RG; run teardown-server.zsh --purge for each first: ${apps//$'\n'/ } ${jobs//$'\n'/ }"
 fi
 confirm_typed "DELETE-PLATFORM $RG"
 az group delete -n "$RG" --yes
@@ -27,6 +29,9 @@ if $PURGE_VAULT; then
   log_warn "$KV_NAME has purge protection: it cannot be purged; it is recoverable and its name reserved for 90 days"
 fi
 log_info "$KV_NAME is soft-deleted (purge protection on): recover with az keyvault recover -n $KV_NAME within 90 days"
-APP="$(az ad app list --display-name "$(jqp .names.github_app)" --query '[0].appId' -o tsv 2>/dev/null || true)"
-[[ -n "$APP" ]] && print -u2 -r -- "GitHub Actions app registration kept: az ad app delete --id $APP"
+if APP="$(entra_app_by_name "$(jqp .names.github_app)")"; then
+  [[ -n "$APP" ]] && print -u2 -r -- "GitHub Actions app registration kept: az ad app delete --id $APP"
+else
+  log_warn "GitHub Actions app registration $(jqp .names.github_app): see above; not printing a delete command"
+fi
 exit 0

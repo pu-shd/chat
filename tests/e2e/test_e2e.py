@@ -99,9 +99,26 @@ def test_hc_job_pinged_success_then_fail():
     assert len(paths) == 2, paths  # exactly one ping per probe
     assert paths[0] == "/e2e-ping-key/e2e-chat-dept-health?create=1"
     assert paths[1] == "/e2e-ping-key/e2e-chat-dept-health/fail?create=1"
-    # Anything but /health is rejected (Django refuses the internal Host header), so the
-    # probe reports it; /health works only because Zulip's nginx pins the Host.
-    assert re.search(r"returned [45]\d\d", pings[1]["body"]), pings[1]["body"]
+    # The probe's listener (:8081) serves /health only; anything else is a 404 it reports.
+    assert re.search(r"returned 404", pings[1]["body"]), pings[1]["body"]
+
+
+HEALTH_LISTENER = "http://zulip:8081"  # = http://<app>:8080 inside the Azure environment
+
+
+@pytest.mark.parametrize("path", ["/", "/login/", "/api/v1/server_settings", "/json/users", "/health/", "/healthz",
+                                  "/chat-theme/paper-tiger/theme.css", "/ahmadi-group"])
+def test_health_listener_exposes_nothing_but_health(path):
+    for headers in ({}, {"Host": "chat.e2e.test", "X-Forwarded-For": "127.0.0.1", **XFP}):
+        r = requests.get(HEALTH_LISTENER + path, headers=headers, allow_redirects=False, timeout=30)
+        assert r.status_code == 404, (path, headers, r.status_code)
+
+
+def test_health_listener_health_ignores_forwarded_headers():
+    for headers in ({}, {"X-Forwarded-For": "203.0.113.9"}, {"Host": "evil.example", "X-Forwarded-For": "10.0.0.1"}):
+        r = requests.get(HEALTH_LISTENER + "/health", headers=headers, allow_redirects=False, timeout=30)
+        assert r.status_code == 200, (headers, r.status_code, r.text[:200])
+    assert requests.post(HEALTH_LISTENER + "/health", timeout=30).status_code == 403
 
 
 def burst(path, client_ip, n):
