@@ -210,3 +210,44 @@ def test_platform_has_a_private_registry():
     (acr,) = resource(tpl, "Microsoft.ContainerRegistry/registries")
     assert acr["sku"]["name"] == "Basic" and acr["properties"]["adminUserEnabled"] is False
     assert "registryLoginServer" in tpl["outputs"]
+
+
+# ---------------------------------------------------------------- public surface
+# The only thing reachable from the Internet is Zulip's web/API ingress. Databases
+# (PostgreSQL and the Redis/RabbitMQ/memcached sidecars) and storage never are.
+
+
+def test_postgres_has_no_public_endpoint():
+    tpl = build("platform.bicep")
+    pg = resource(tpl, "Microsoft.DBforPostgreSQL/flexibleServers")
+    assert len(pg) == 1
+    net = pg[0]["properties"]["network"]
+    assert net["publicNetworkAccess"] == "Disabled"
+    assert "delegatedSubnetResourceId" in net and "privateDnsZoneArmResourceId" in net
+    # A firewall rule would only matter with public access; there must be none at all.
+    assert resource(tpl, "Microsoft.DBforPostgreSQL/flexibleServers/firewallRules") == []
+    assert "firewallRules" not in json.dumps(pg[0])
+
+
+def test_storage_is_reachable_only_from_the_environment_subnet():
+    tpl = build("platform.bicep")
+    for sa in resource(tpl, "Microsoft.Storage/storageAccounts"):
+        props = sa["properties"]
+        acls = props["networkAcls"]
+        assert acls["defaultAction"] == "Deny"
+        assert acls.get("ipRules", []) == []
+        assert len(acls["virtualNetworkRules"]) == 1 and acls["virtualNetworkRules"][0]["action"] == "Allow"
+        assert props["allowBlobPublicAccess"] is False and props["allowSharedKeyAccess"] is False
+
+
+def test_only_the_zulip_web_ingress_is_external(server):
+    apps = resource(server, "Microsoft.App/containerApps")
+    assert len(apps) == 1
+    ingress = apps[0]["properties"]["configuration"]["ingress"]
+    assert ingress["external"] is True and ingress["targetPort"] == 80
+    assert ingress["allowInsecure"] is False
+    assert all(p["external"] is False for p in ingress["additionalPortMappings"])
+    # No sidecar port is the main ingress, and no job takes inbound traffic at all.
+    assert ingress["targetPort"] not in {5432, 6379, 5672, 11211}
+    for job in resource(server, "Microsoft.App/jobs"):
+        assert "ingress" not in job["properties"]["configuration"], job["name"]

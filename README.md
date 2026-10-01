@@ -243,6 +243,12 @@ Realms are deactivated, never deleted: `realm.zsh --deactivate <slug>`, with typ
 
 ## Security model
 
+- **Public surface: the web/API only.** From the Internet, the one reachable endpoint is each server's Zulip ingress (HTTPS; HTTP is refused, not redirected by Azure).
+  - PostgreSQL has **no public endpoint**: it lives in a delegated private subnet with private DNS, and public network access is disabled, so it has no firewall rules to get wrong.
+  - Redis, RabbitMQ and memcached are sidecars whose ports are mapped only inside the environment; the health port serves only `/health` there.
+  - The storage account denies every network except the Container Apps subnet.
+  - `tests/unit/test_bicep.py` fails if any of this changes.
+  - Key Vault and the container registry keep Azure's public endpoints, because GitHub-hosted CI uses them. Every request needs an Entra token with an RBAC role, and neither holds a database.
 - **Who can act as CI.** The config repo's Azure identity trusts two GitHub Environments.
   - `<dept>` (deploy, keepalive, IP gate, update checks) accepts only protected branches, so a pushed feature branch cannot get the Azure token.
   - `<dept>-admin` (Teardown, realm deactivation, role changes) also needs a reviewer's approval, and **not from the person who started the run** (`prevent_self_review`). Add a second reviewer with `--admin-reviewer <login>` (repeatable, on `setup-github-repo.zsh` or `bootstrap.zsh --set-gh-vars`); with only one, teardowns can be started but never approved, and the script warns.
