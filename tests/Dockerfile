@@ -10,7 +10,7 @@ RUN apt-get update \
       postgresql-client ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-ARG BICEP_VERSION=v0.43.8
+ARG BICEP_VERSION=v0.47.16
 ARG TARGETARCH
 # bicep is a .NET single-file binary; without ICU it aborts unless globalization is invariant.
 ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
