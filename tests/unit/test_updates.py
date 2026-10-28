@@ -54,6 +54,10 @@ def tree(tmp_path):
         shutil.copy(ROOT / rel, tmp_path / rel)
     df = tmp_path / "image/Dockerfile"
     df.write_text(updates.DOCKERFILE_RE.sub(f"ARG ZULIP_IMAGE=ghcr.io/zulip/zulip-server:12.3-0@{D_OLD}", df.read_text()))
+    # Pin the bicep CLI too: the repo's own pin moves (the update check bumps it before
+    # running these tests), and the tests must not depend on where it is.
+    tdf = tmp_path / "tests/Dockerfile"
+    tdf.write_text(updates.BICEP_RE.sub("ARG BICEP_VERSION=v0.43.8", tdf.read_text()))
     return tmp_path
 
 
@@ -159,6 +163,12 @@ def test_bicep_cli_bump(web, tree, capsys):
     registry(web, zulip_tags=["12.3-0"], digest=D_OLD, sidecar_tags=CURRENT_SIDECARS, bicep="v0.47.16")
     run_zulip(tree, capsys)
     assert "ARG BICEP_VERSION=v0.47.16" in (tree / "tests/Dockerfile").read_text()
+
+
+def test_bicep_cli_is_never_downgraded(web, tree, capsys):
+    registry(web, zulip_tags=["12.3-0"], digest=D_OLD, sidecar_tags=CURRENT_SIDECARS, bicep="v0.40.1")
+    run_zulip(tree, capsys)
+    assert "ARG BICEP_VERSION=v0.43.8" in (tree / "tests/Dockerfile").read_text()
 
 
 def test_dry_run_changes_nothing(web, tree, capsys):
