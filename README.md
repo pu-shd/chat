@@ -79,6 +79,36 @@ servers:
   - that gated servers have a fallback and a certificate.
 - `render --check` is the CI gate that fails when `generated/` is stale.
 
+## From preview to production
+
+Nothing here has run on Azure yet (see **Not yet verified on Azure** at the end). Take a department through three stages; each one is cheap to stop at.
+
+| Stage | Command | Creates | Cost |
+|---|---|---|---|
+| 1. Preview | `scripts/local.zsh up --config <config repo>/<dept>` | containers on your Mac only (see **Looking at it locally**) | none |
+| 2. Trial run | `bootstrap.zsh --config <dept>trial` on an uncommitted copy, then `teardown.zsh` | a complete, separately named department in Azure, torn down the same day | billed by the hour while it exists |
+| 3. Production | `bootstrap.zsh --config <dept> --set-gh-vars` | the real department, plus CI's Azure access, so pushes deploy from then on | ongoing |
+
+**The trial run** checks the Azure-only items with a throwaway copy of the department, without touching its CI:
+```zsh
+cd chat-config                                   # with .chat-template at template.lock's commit
+cp -R <dept> <dept>trial                         # never committed: config repos ignore */ ending in "trial"
+$EDITOR <dept>trial/chat.yml                     # department: <dept>trial; azure.prefix: <dept>trial-chat
+.chat-template/.venv/bin/python .chat-template/tools/render.py render <dept>trial
+.chat-template/scripts/bootstrap.zsh --config <dept>trial          # no --set-gh-vars: GitHub is left alone
+```
+- With a new prefix every Azure name is new (resource group, Key Vault, registry, apps), so the trial can't touch the real department's resources. Keep `dns: pending`: the trial answers on its `*.azurecontainerapps.io` names and needs no DNS.
+- The `github` step still creates a trial-only CI app registration; nothing uses it, because without `--set-gh-vars` no repository variable points at it.
+- Work through **Not yet verified on Azure**: sign in, `realm.zsh --list`, `realm.zsh --send-test-email you@…`, an image upgrade (`deploy-server.zsh` with a new image), a restart.
+- Remove everything, **without `--github`**:
+  ```zsh
+  .chat-template/scripts/teardown.zsh --config <dept>trial --purge --platform --entra --healthchecks   # TEARDOWN <dept>trial ALL PURGE
+  az ad app delete --id "$(az ad app list --display-name <dept>trial-chat-github-actions --query '[0].appId' -o tsv)"
+  rm -rf <dept>trial .chat-bootstrap/<dept>trial.state
+  ```
+  `--github` deletes the config repo's GitHub Environment and `AZURE_*` variables, and the copy shares them with the real department, so it would cut off production CI. The trial's CI app registration is the only GitHub-side leftover; the `az ad app delete` line removes it.
+- Key Vault purge protection keeps the vault's name reserved for 90 days, so a second trial within that time needs another prefix.
+
 ## First deployment (bootstrap)
 
 You need:
@@ -446,7 +476,7 @@ CI (`.github/workflows/ci.yml`) runs both, plus actionlint. The Release workflow
 
 ## Not yet verified on Azure
 
-These depend on Azure behaviour that the local tests cannot reproduce. Check them in a scratch resource group before the first real deployment:
+These depend on Azure behaviour that the local tests cannot reproduce. Check them with a trial run (see **From preview to production**) before the first real deployment:
 - PostgreSQL Flexible Server accepts `LC_COLLATE 'C.UTF-8'`. Tested on PostgreSQL 17 locally; `chat-dbinit` fails loudly if Azure disagrees.
 - docker-zulip's `chown` of `/data/uploads` on the NFS share (`NoRootSquash`).
 - `LOADBALANCER_IPS` set to the environment subnet: the ingress proxy's `X-Forwarded-For` must be trusted, and public clients must be denied `/health`.
