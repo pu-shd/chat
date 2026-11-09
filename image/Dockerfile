@@ -5,7 +5,7 @@
 # (scripts/build-image.zsh, az acr build).
 #
 # The base is pinned by digest; bump it (and the tag) together when upgrading Zulip.
-ARG ZULIP_IMAGE=ghcr.io/zulip/zulip-server:12.3-0@sha256:76a1ecc4ba5470869d9609ef1ec16497b410189918b2daba85862183a59aa275
+ARG ZULIP_IMAGE=ghcr.io/zulip/zulip-server:12.4-0@sha256:0a2b5760daaa69fc6fd425fed1cbd969be79c5842cd94443ce798243e7fb07af
 FROM ${ZULIP_IMAGE}
 # The pu-shd/chat commit this image was built from (build-image.zsh passes it).
 ARG CHAT_TEMPLATE_SHA=unknown

@@ -1,6 +1,6 @@
-"""Vendored from zulip/zulip@12.3 zerver/lib/name_restrictions.py by tools/sync-reserved.py. Do not edit."""
+"""Vendored from zulip/zulip@12.4 zerver/lib/name_restrictions.py by tools/sync-reserved.py. Do not edit."""
 
-ZULIP_VERSION = "12.3"
+ZULIP_VERSION = "12.4"
 
 ZULIP_RESERVED_SUBDOMAINS = frozenset({
     'acme',
@@ -332,7 +332,7 @@ GENERIC_RESERVED_SUBDOMAINS = frozenset({
     'xoxo',
 })
 
-# First path segments routed by Zulip 12.3 (zproject/urls.py + nginx app locations).
+# First path segments routed by Zulip 12.4 (zproject/urls.py + nginx app locations).
 # A /<slug> redirect on these would shadow a Zulip route.
 ZULIP_ROUTE_SEGMENTS = frozenset({
     '.well-known',
