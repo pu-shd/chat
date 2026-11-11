@@ -1,6 +1,6 @@
 # Test image for pu-shd/chat: everything the unit + integration suites need, so CI and
 # a laptop run the same thing:  docker-compose -f tests/docker-compose.yml run --rm tests
-FROM python:3.14-slim
+FROM python:3.15-slim
 
 # zsh/jq/openssl: the operations scripts. bash: the image entrypoint scripts.
 # postgresql-client: chat-dbinit integration tests. git: build-image.zsh checks its
